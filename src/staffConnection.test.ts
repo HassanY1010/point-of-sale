@@ -1,0 +1,166 @@
+/**
+ * The staff surface's connection binding.
+ *
+ * Every case here is a way the answer can be ABSENT, because absent is the
+ * common case — unbound surfaces, and any Adminium older than the binding —
+ * and all of them must keep the app booting on its old inference.
+ */
+import { describe, expect, it, vi } from "vitest";
+
+import { configBase, loadStaffConfig, resolveStaffConnectionId } from "./staffConnection.ts";
+
+const ok = (doc: unknown) =>
+  vi.fn(async () =>
+    new Response(JSON.stringify(doc), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+  ) as unknown as typeof fetch;
+
+describe("resolveStaffConnectionId", () => {
+  it("reads the bound connection from the served document", async () => {
+    const fetchImpl = ok({ connectionId: "con_42" });
+    expect(
+      await resolveStaffConnectionId({ hostedStaff: true, base: "/apps/clients/staff/", fetchImpl }),
+    ).toBe("con_42");
+  });
+
+  it("returns null for an UNBOUND surface — a complete answer, not a failure", async () => {
+    const fetchImpl = ok({ connectionId: null });
+    expect(
+      await resolveStaffConnectionId({ hostedStaff: true, base: "/apps/clients/staff/", fetchImpl }),
+    ).toBeNull();
+  });
+
+  it("returns null when an older server answers with the SPA index", async () => {
+    // The route does not exist there; the wildcard serves index.html and
+    // `json()` throws. The app must still boot against that Adminium.
+    const fetchImpl = vi.fn(
+      async () => new Response("<!doctype html><html></html>", { status: 200 }),
+    ) as unknown as typeof fetch;
+    expect(
+      await resolveStaffConnectionId({ hostedStaff: true, base: "/apps/clients/staff/", fetchImpl }),
+    ).toBeNull();
+  });
+
+  it("never asks on a non-staff build", async () => {
+    // A demo or customer bundle has no session and no business fetching this.
+    const fetchImpl = ok({ connectionId: "con_42" });
+    expect(await resolveStaffConnectionId({ hostedStaff: false, fetchImpl })).toBeNull();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe("configBase", () => {
+  const BAKED = "/apps/clients/staff/";
+
+  it("asks the INSTANCE mount when the page is served from one", () => {
+    expect(configBase(BAKED, "/apps/clients/berlin/staff/invoices")).toBe(
+      "/apps/clients/berlin/staff/",
+    );
+  });
+
+  it("keeps the baked base on the unslugged mount", () => {
+    expect(configBase(BAKED, "/apps/clients/staff/invoices")).toBe(BAKED);
+  });
+
+  it("asks `/` on a MAPPED DOMAIN, which is the only place its instance is known", () => {
+    /*
+     * Reversed deliberately. This returned the baked `/apps/…` form while
+     * nothing answered at the root — but a mapped host can now point at an
+     * instance, and the bundle never sees the domain map, so the root document
+     * is the only thing that can tell it which database it belongs to. Asking
+     * the baked form would pin every mapped host to the app's own.
+     */
+    expect(configBase(BAKED, "/invoices/7")).toBe("/");
+    expect(configBase(BAKED, "/")).toBe("/");
+  });
+
+  it("never reads the unslugged mount as an instance called `staff`", () => {
+    // `/apps/clients/staff/staff` is a deep link, not an instance.
+    expect(configBase(BAKED, "/apps/clients/staff/staff")).toBe(BAKED);
+  });
+
+  it("ignores an instance path belonging to a DIFFERENT app or side", () => {
+    // One bundle must never fetch another surface's binding.
+    expect(configBase(BAKED, "/apps/clinic/berlin/staff/x")).toBe(BAKED);
+    expect(configBase(BAKED, "/apps/clients/berlin/customer/x")).toBe(BAKED);
+  });
+});
+
+describe("loadStaffConfig", () => {
+  it("reads everything a till boots from, and keeps nothing it does not understand", async () => {
+    const fetchImpl = ok({
+      connectionId: "con_42",
+      installId: "ins_7",
+      appName: null,
+      tables: { tickets: "pos_tickets", odd: 7 },
+      settings: { business_type: "retail" },
+      timezone: "Europe/Lisbon",
+      timezoneSource: "operator",
+      serverTimezone: "UTC",
+      currency: "EUR",
+      user: { id: "usr_1", name: "Cara", email: "cara@example.com" },
+      csrfToken: "tok",
+      publicKeys: { kiosk: "adm_pub_k", broken: 3 },
+      access: { tables: { tickets: ["read", "update", "fly"], odd: "all" }, roles: [{ slug: "pos-cashier", name: "POS cashier" }, { name: "no slug" }] },
+      addOns: { invoices: { version: "1.0.3", settings: { business_name: "Daybreak" } }, "barcode-labels": { version: 2, settings: "none" }, odd: true },
+      payments: { on: true, online: "yes", test: false, refund: true, secret: "x" },
+    });
+    expect(await loadStaffConfig({ hostedStaff: true, base: "/apps/pos/staff/", fetchImpl })).toEqual({
+      connectionId: "con_42",
+      installId: "ins_7",
+      appName: null,
+      tables: { tickets: "pos_tickets" },
+      settings: { business_type: "retail" },
+      timezone: "Europe/Lisbon",
+      timezoneSource: "operator",
+      serverTimezone: "UTC",
+      currency: "EUR",
+      user: { id: "usr_1", name: "Cara", email: "cara@example.com" },
+      csrfToken: "tok",
+      publicKeys: { kiosk: "adm_pub_k" },
+      access: { tables: { tickets: ["read", "update"] }, roles: [{ slug: "pos-cashier", name: "POS cashier" }] },
+      addOns: { invoices: { version: "1.0.3", settings: { business_name: "Daybreak" } }, "barcode-labels": { version: null, settings: {} } },
+      // Each payments flag true only when the server said so in so many words.
+      payments: { on: true, online: false, test: false, refund: true },
+    });
+  });
+
+  it("says nothing of access when the server said nothing, so no button is hidden on a guess", async () => {
+    const fetchImpl = ok({ connectionId: "con_42", tables: {} });
+    const config = await loadStaffConfig({ hostedStaff: true, base: "/apps/pos/staff/", fetchImpl });
+    expect(config?.access).toBeNull();
+    expect(config?.publicKeys).toEqual({});
+    // No add-on attached, or an Adminium too old to say: every feature built on one is off.
+    expect(config?.addOns).toEqual({});
+    // An Adminium that says nothing of payments: the till takes none through it, and reads as it always has.
+    expect(config?.payments).toEqual({ on: false, online: false, test: false, refund: false });
+  });
+
+  it("names no install from an Adminium too old to say, so no install header is sent", async () => {
+    const config = await loadStaffConfig({ hostedStaff: true, base: "/apps/pos/staff/", fetchImpl: ok({ connectionId: "con_42" }) });
+    expect(config?.installId).toBeNull();
+  });
+
+  it("gives a second install, served at its own mount, its own install id and database", async () => {
+    // Each mount answers its own document; the bare mount is the first install.
+    const docs: Record<string, unknown> = {
+      "/apps/pos/staff/surface-config.json": { connectionId: "con_cafe", installId: "ins_cafe" },
+      "/apps/pos/kiln/staff/surface-config.json": { connectionId: "con_kiln", installId: "ins_kiln" },
+    };
+    const fetchImpl = vi.fn(async (input: unknown) =>
+      new Response(JSON.stringify(docs[String(input)] ?? null), { status: docs[String(input)] === undefined ? 404 : 200 }),
+    ) as unknown as typeof fetch;
+    const first = await loadStaffConfig({ hostedStaff: true, base: configBase("/apps/pos/staff/", "/apps/pos/staff/"), fetchImpl });
+    const second = await loadStaffConfig({ hostedStaff: true, base: configBase("/apps/pos/staff/", "/apps/pos/kiln/staff/sales"), fetchImpl });
+    expect([first?.installId, first?.connectionId]).toEqual(["ins_cafe", "con_cafe"]);
+    expect([second?.installId, second?.connectionId]).toEqual(["ins_kiln", "con_kiln"]);
+  });
+
+  it("is null outside a hosted staff build", async () => {
+    const fetchImpl = ok({});
+    expect(await loadStaffConfig({ hostedStaff: false, fetchImpl })).toBeNull();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});

@@ -1,0 +1,360 @@
+import { useState } from 'react';
+
+import { usePos, curStaffOf } from '../state/store';
+import { source } from '../data/source';
+import { demoSale, money, tableName } from '../state/calc';
+import { useI18n } from '../i18n';
+import { DEMO } from '../surface';
+import { Icon } from '../components/Icon';
+import { TotalLabel } from '../components/Figures';
+import { CardPrints } from '../components/CardPrints';
+import { css } from '../components/css';
+import type { Sale } from '../data/types';
+import { splitWords } from './PayPanels';
+
+const MONO = "font-family:'JetBrains Mono',monospace;";
+
+export function Complete() {
+  const s = usePos();
+  const { t, date, number } = useI18n();
+  const [mailOpen, setMailOpen] = useState(false);
+  const emailing = s.features['emailed-receipts'];
+  /*
+   * The receipt of the sale that just closed. Only the demo makes one up for a
+   * receipt opened with no sale behind it (its dock can open this screen
+   * directly); a real till shows nothing rather than a sale that never
+   * happened.
+   */
+  const sale = s.lastSale ?? (DEMO ? demoSale(s.ticket, curStaffOf(s).name) : null);
+  if (sale === null) return <NoSale />;
+  const venue = source.venue();
+  const contact = [venue.address, venue.phone].filter((x): x is string => x !== null && x !== '').join(' · ');
+
+  const methods: string[] = [];
+  sale.splits.forEach((sp) => {
+    const l = splitWords(t, sp) ?? t(sp.method === 'cash' ? 'common.cash' : sp.method === 'card' ? 'common.card' : sp.method === 'gift_card' ? 'gift.method' : 'payment.qr');
+    if (methods.indexOf(l) < 0) methods.push(l);
+  });
+  /*
+   * The clock is `Intl`'s, not a hand-rolled 12-hour split: whether this reads
+   * "2:41 PM" or "14:41" is the locale's call, and half the world does not
+   * write AM/PM at all.
+   */
+  const at = date(sale.at, { hour: 'numeric', minute: '2-digit' });
+
+  return (
+    <div className="pos-scroll" style={css('flex:1;min-height:0;overflow-y:auto;background:var(--bg);')}>
+      <div style={css('max-width:860px;margin:0 auto;padding:34px 24px 40px;')}>
+        <div style={css('text-align:center;margin-bottom:28px;')}>
+          <div style={css('width:76px;height:76px;border-radius:22px;margin:0 auto;background:var(--pos-soft);color:var(--pos);display:flex;align-items:center;justify-content:center;')}>
+            <Icon name="check-circle-2" size={42} />
+          </div>
+          <div style={css('font-size:26px;font-weight:800;letter-spacing:-.02em;margin-top:16px;')}>{t('complete.title')}</div>
+          <div style={css('font-size:14.5px;color:var(--fg-muted);margin-top:5px;')}>
+            {t('complete.subtitle', { n: sale.number, table: tableName(sale.table, s.mode), time: at })}
+          </div>
+          <div style={css('font-size:48px;font-weight:800;' + MONO + 'letter-spacing:-.02em;margin-top:14px;')}>{money(sale.total)}</div>
+          {sale.change > 0 && (
+            <div style={css('display:inline-flex;align-items:center;gap:8px;margin-top:12px;padding:9px 17px;border-radius:20px;background:var(--pos-soft);color:var(--pos);font-size:15px;font-weight:800;')}>
+              {t('payment.changeDue')}<span style={css(MONO)}>{money(sale.change)}</span>
+            </div>
+          )}
+        </div>
+
+        <div style={css('display:flex;gap:22px;flex-wrap:wrap;align-items:flex-start;justify-content:center;')}>
+          <div style={css('flex:1;min-width:280px;display:flex;justify-content:center;')}>
+            <div className="receipt-paper" style={css('width:300px;max-width:100%;background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:22px 22px 24px;box-shadow:var(--shadow-lg);')}>
+              <div style={css('text-align:center;margin-bottom:6px;')}>
+                <div style={css('font-size:20px;font-weight:800;letter-spacing:.04em;')}>{venue.name.toUpperCase()}</div>
+                {/* The venue's own street and phone, from its settings. */}
+                {contact !== '' && <div style={css('font-size:11px;color:var(--fg-muted);margin-top:3px;')}>{contact}</div>}
+              </div>
+              <div style={css('border-top:1px dashed var(--border-strong);margin:13px 0;')} />
+              <div style={css('display:flex;justify-content:space-between;font-size:11.5px;color:var(--fg-muted);margin-bottom:11px;' + MONO)}>
+                <span>{t('complete.orderNo', { n: sale.number })}</span>
+                <span>{tableName(sale.table, s.mode)}</span>
+              </div>
+              {/* A printed receipt says when (the comp draws no print layout): the screen above already does. */}
+              <div className="receipt-when" style={css('font-size:11px;color:var(--fg-muted);margin:-6px 0 11px;' + MONO)}>
+                {date(sale.at, { dateStyle: 'medium', timeStyle: 'short' })}
+              </div>
+              {sale.items.map((it, i) => {
+                const sub = (it.mod || '') + (it.note ? (it.mod ? ' · ' : '') + '“' + it.note + '”' : '');
+                return (
+                  <div key={i} style={css('display:flex;justify-content:space-between;gap:10px;margin-bottom:8px;')}>
+                    <span style={css('font-size:12.5px;line-height:1.4;')}>
+                      <span style={css('font-weight:700;' + MONO)}>{it.qty}×</span> {it.name}
+                      {!!sub && <span style={css('display:block;font-size:11px;color:var(--fg-muted);')}>{sub}</span>}
+                    </span>
+                    <span style={css('font-size:12.5px;' + MONO)}>{money(it.line)}</span>
+                  </div>
+                );
+              })}
+              <div style={css('border-top:1px dashed var(--border-strong);margin:13px 0;')} />
+              <ReceiptRow label={t('common.subtotal')} value={money(sale.subtotal)} />
+              {/* A discounted sale used to print Subtotal / Tax / Tip over a
+                  Total that had the discount removed — a receipt whose own rows
+                  contradicted its total. */}
+              <ReceiptReductions sale={sale} />
+              <ReceiptRow label={t('common.tax')} value={money(sale.tax)} />
+              <ReceiptRow label={t('common.tip')} value={money(sale.tip)} />
+              <div style={css('display:flex;justify-content:space-between;font-size:15px;font-weight:800;padding-top:9px;border-top:1px solid var(--border);margin-top:4px;')}>
+                <TotalLabel estimate={sale.estimate === true} style="font-size:15px;font-weight:800;" />
+                <span style={css(MONO)}>{money(sale.total)}</span>
+              </div>
+              <div style={css('border-top:1px dashed var(--border-strong);margin:13px 0;')} />
+              {/* One row per payment: what each took, and a gift card by its last four. */}
+              {sale.splits.length === 0 ? (
+                <div data-paid-row="" style={css('display:flex;justify-content:space-between;font-size:12px;')}>
+                  <span style={css('color:var(--fg-muted);')}>{t('complete.paidWith', { methods: methods.join(' + ') })}</span>
+                  <span style={css(MONO)}>{money(sale.total)}</span>
+                </div>
+              ) : (
+                sale.splits.map((sp, i) => (
+                  <div key={i} data-paid-row="" style={css('display:flex;justify-content:space-between;gap:10px;font-size:12px;margin-bottom:4px;')}>
+                    <span style={css('color:var(--fg-muted);')}>
+                      {t('complete.paidWith', {
+                        methods:
+                          sp.method === 'gift_card' && sp.cardLeft !== undefined
+                            ? t('cards.kept', { last4: sp.reference ?? '' })
+                            : (splitWords(t, sp) ?? t(sp.method === 'cash' ? 'common.cash' : sp.method === 'card' ? 'common.card' : sp.method === 'gift_card' ? 'gift.method' : 'payment.qr')),
+                      })}
+                    </span>
+                    {/* A single payment took the whole sale, tip and all. */}
+                    <span style={css(MONO)}>{money(sale.splits.length === 1 ? sale.total : sp.amount)}</span>
+                  </div>
+                ))
+              )}
+              <ReceiptCards sale={sale} />
+              {/* What the guest asked for on the customer display (nothing sends it yet). */}
+              {sale.receipt !== undefined && sale.receipt.via !== 'none' && (
+                <div className="no-print" role="note" style={css('margin-top:9px;font-size:11.5px;color:var(--fg-muted);')}>
+                  {sale.receipt.via === 'print'
+                    ? t('complete.guestWantsPrint')
+                    : t(sale.receipt.via === 'email' ? 'complete.guestWantsEmail' : 'complete.guestWantsText', { to: sale.receipt.to ?? '' })}
+                </div>
+              )}
+              {/* The member the sale was for: what it earned, and where that leaves them. */}
+              {sale.member !== undefined && (
+                <div className="receipt-member" style={css('margin-top:9px;font-size:12px;display:flex;justify-content:space-between;gap:10px;')}>
+                  <span style={css('color:var(--fg-muted);')}>{sale.member.name}</span>
+                  <span style={css(MONO)}>
+                    {sale.member.balance === null
+                      ? t('complete.pointsEarned', { n: number(sale.member.earned) })
+                      : t('complete.pointsEarnedBalance', { n: number(sale.member.earned), balance: number(sale.member.balance) })}
+                  </span>
+                </div>
+              )}
+              <div style={css('text-align:center;font-size:11px;color:var(--fg-muted);margin-top:18px;')}>
+                {venue.footer === null || venue.footer === '' ? t('complete.servedBy', { staff: sale.staff }) : t('complete.servedByOnly', { staff: sale.staff })}
+              </div>
+              {venue.footer !== null && venue.footer !== '' && <div style={css('text-align:center;font-size:11px;color:var(--fg-muted);margin-top:4px;')}>{venue.footer}</div>}
+            </div>
+          </div>
+
+          <div className="no-print" style={css('flex:1;min-width:280px;display:flex;flex-direction:column;gap:11px;')}>
+            {/* A card sold on this ticket holds its money now: printed by Offers, once. */}
+            <CardPrints />
+            <button className="pos-press" onClick={s.printReceipt} style={css('height:66px;border-radius:16px;border:none;background:var(--accent);color:var(--accent-fg);font-size:17px;font-weight:800;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:11px;')}>
+              <Icon name="printer" size={21} />
+              {t('complete.printReceipt')}
+            </button>
+            {/*
+              * Email only while Invoices & Receipts is attached: it draws the
+              * receipt the email carries. Without it there is no button at all.
+              * A texted receipt has no add-on to send it yet, so it stays the
+              * demo's.
+              */}
+            {(emailing || DEMO) && (
+              <div style={css('display:flex;gap:11px;')}>
+                {emailing && (
+                  <button className="pos-press" aria-expanded={mailOpen} aria-controls="receipt-mail" onClick={() => setMailOpen((open) => !open)} style={css('flex:1;height:62px;border-radius:15px;border:1px solid ' + (mailOpen ? 'var(--accent)' : 'var(--border-strong)') + ';background:' + (mailOpen ? 'var(--accent-soft)' : 'var(--surface)') + ';color:' + (mailOpen ? 'var(--accent)' : 'var(--fg)') + ';font-size:15px;font-weight:800;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:9px;')}>
+                    <Icon name="mail" size={19} />
+                    {t('complete.email')}
+                  </button>
+                )}
+                {DEMO && (
+                  <button className="pos-press" onClick={() => s.sendReceipt('text')} style={css('flex:1;height:62px;border-radius:15px;border:1px solid var(--border-strong);background:var(--surface);color:var(--fg);font-size:15px;font-weight:800;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:9px;')}>
+                    <Icon name="message-square" size={19} />
+                    {t('complete.text')}
+                  </button>
+                )}
+              </div>
+            )}
+            {emailing && mailOpen && <ReceiptMail initial={sale.receipt?.via === 'email' ? (sale.receipt.to ?? '') : ''} onDone={() => setMailOpen(false)} />}
+            {emailing && (sale.emailedTo ?? []).length > 0 && (
+              <div role="status" style={css('display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--fg-muted);')}>
+                {(sale.emailedTo ?? []).map((to) => (
+                  <span key={to} style={css('display:flex;align-items:center;gap:7px;')}>
+                    <Icon name="mail-check" size={15} color="var(--pos)" />
+                    <bdi>{t('complete.emailedTo', { to })}</bdi>
+                  </span>
+                ))}
+              </div>
+            )}
+            <div style={css('height:1px;background:var(--border);margin:6px 0;')} />
+            <button data-new-order="" className="pos-press" onClick={s.newOrder} style={css('height:66px;border-radius:16px;border:1.5px solid var(--accent);background:var(--accent-soft);color:var(--accent);font-size:17px;font-weight:800;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:11px;')}>
+              <Icon name="plus" size={21} />
+              {t('complete.newOrder')}
+            </button>
+            {s.mode === 'restaurant' && (
+              <button className="pos-press" onClick={() => usePos.setState({ view: 'floor' })} style={css('height:56px;border-radius:15px;border:none;background:transparent;color:var(--fg-muted);font-size:15px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:9px;')}>
+                <Icon name="grid-3x3" size={18} />
+                {t('complete.backToFloor')}
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The guest's address, asked for at the till, and the receipt queued to it.
+ *
+ * Filled in when the guest already chose email on the customer display; the
+ * cashier checks it with them and sends. Nothing else keeps the address: it is
+ * written only onto the one email, a personal column in Adminium.
+ */
+function ReceiptMail({ initial, onDone }: { initial: string; onDone: () => void }) {
+  const s = usePos();
+  const { t } = useI18n();
+  const [to, setTo] = useState(initial);
+  const [invalid, setInvalid] = useState(false);
+  const input = 'width:100%;height:52px;padding:0 15px;border-radius:13px;border:1.5px solid ' + (invalid ? 'var(--danger)' : 'var(--border-strong)') + ';background:var(--surface);color:var(--fg);font-size:16px;font-weight:600;font-family:inherit;outline:none;box-sizing:border-box;';
+  return (
+    <form
+      id="receipt-mail"
+      aria-labelledby="receipt-mail-title"
+      noValidate
+      onSubmit={(e) => {
+        e.preventDefault();
+        const outcome = s.emailReceipt(to);
+        if (outcome === 'invalid') {
+          setInvalid(true);
+          return;
+        }
+        if (outcome === 'queued') onDone();
+      }}
+      style={css('display:flex;flex-direction:column;gap:10px;padding:16px;border-radius:15px;border:1px solid var(--border);background:var(--surface);')}
+    >
+      <div id="receipt-mail-title" style={css('font-size:15px;font-weight:800;')}>{t('complete.emailTitle')}</div>
+      <div>
+        <label htmlFor="receipt-mail-to" style={css('display:block;font-size:12.5px;font-weight:800;color:var(--fg-muted);margin-bottom:6px;')}>
+          {t('complete.emailLabel')}
+        </label>
+        <input
+          id="receipt-mail-to"
+          type="email"
+          inputMode="email"
+          dir="ltr"
+          value={to}
+          onChange={(e) => {
+            setTo(e.target.value);
+            setInvalid(false);
+          }}
+          autoComplete="off"
+          autoFocus
+          aria-invalid={invalid}
+          aria-describedby={invalid ? 'receipt-mail-error receipt-mail-note' : 'receipt-mail-note'}
+          style={css(input)}
+        />
+        {invalid && (
+          <div id="receipt-mail-error" role="alert" style={css('margin-top:6px;font-size:13px;font-weight:700;color:var(--danger);')}>
+            {t('complete.emailInvalid')}
+          </div>
+        )}
+      </div>
+      <div id="receipt-mail-note" style={css('font-size:12.5px;line-height:1.45;color:var(--fg-muted);')}>{t('complete.emailNote')}</div>
+      <div style={css('display:flex;gap:9px;')}>
+        <button type="button" className="pos-press" onClick={onDone} style={css('width:120px;height:54px;border-radius:14px;border:1px solid var(--border-strong);background:var(--surface);color:var(--fg);font-family:inherit;font-size:15px;font-weight:800;cursor:pointer;')}>
+          {t('common.cancel')}
+        </button>
+        <button type="submit" className="pos-press" style={css('flex:1;height:54px;border-radius:14px;border:none;background:var(--accent);color:var(--accent-fg);font-family:inherit;font-size:15px;font-weight:800;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;')}>
+          <Icon name="send" size={17} />
+          {t('complete.emailSend')}
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function ReceiptRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div style={css('display:flex;justify-content:space-between;font-size:12px;margin-bottom:5px;')}>
+      <span style={css('color:var(--fg-muted);')}>{label}</span>
+      <span style={css("font-family:'JetBrains Mono',monospace;")}>{value}</span>
+    </div>
+  );
+}
+
+/** No sale to show — a real till opened on its receipt with nothing sold. */
+function NoSale() {
+  const s = usePos();
+  const { t } = useI18n();
+  return (
+    <div style={css('flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:30px;text-align:center;')}>
+      <Icon name="receipt" size={40} color="var(--fg-muted)" />
+      <div style={css('font-size:16px;font-weight:700;color:var(--fg-muted);')}>{t('complete.noSale')}</div>
+      <button className="pos-press" onClick={s.newOrder} style={css('height:56px;padding:0 24px;border-radius:15px;border:none;background:var(--accent);color:var(--accent-fg);font-size:16px;font-weight:800;cursor:pointer;')}>
+        {t('complete.newOrder')}
+      </button>
+    </div>
+  );
+}
+
+/**
+ * What came off the sale. With Offers these are Adminium's own lines — a
+ * code, an offer, the staff discount, a row each; without, the till's one
+ * discount row.
+ */
+export function ReceiptReductions({ sale }: { sale: Pick<Sale, 'discount' | 'discountLabel' | 'reductions'> }) {
+  const { t } = useI18n();
+  if (sale.reductions !== undefined && sale.reductions.length > 0) {
+    return (
+      <>
+        {sale.reductions.map((line, i) => (
+          <ReceiptRow key={line.kind + line.name + String(i)} label={line.name} value={'−' + money(line.amount)} />
+        ))}
+      </>
+    );
+  }
+  if (!(sale.discount > 0)) return null;
+  return <ReceiptRow label={sale.discountLabel || t('common.discount')} value={'−' + money(sale.discount)} />;
+}
+
+/**
+ * Gift cards on the receipt: what each card that paid has left (Adminium's
+ * answer when it paid), and each card sold on this ticket by its last four.
+ * A new card's whole code is not the receipt's to show: Offers & gift cards
+ * prints the card itself, once (`CardPrints`).
+ */
+export function ReceiptCards({ sale }: { sale: Pick<Sale, 'cardBalances' | 'newCards'> }) {
+  const { t } = useI18n();
+  const balances = sale.cardBalances ?? [];
+  const cards = sale.newCards ?? [];
+  if (balances.length === 0 && cards.length === 0) return null;
+  return (
+    <div className="receipt-cards" style={css('margin-top:9px;')}>
+      {balances.map((one, i) => (
+        <div key={'left' + String(i)} style={css('display:flex;justify-content:space-between;gap:10px;font-size:12px;margin-bottom:4px;')}>
+          {/* The payment's own row names the card; with two cards, each balance says whose it is. */}
+          <span style={css('color:var(--fg-muted);')}>{balances.length > 1 ? `${t('cards.balanceLeft')} · ${t('cards.kept', { last4: one.last4 })}` : t('cards.balanceLeft')}</span>
+          <span style={css(MONO)}>{money(one.left)}</span>
+        </div>
+      ))}
+      {cards.map((one, i) => (
+        <div key={'new' + String(i)} style={css('margin-top:8px;padding-top:8px;border-top:1px dashed var(--border-strong);')}>
+          <div style={css('display:flex;justify-content:space-between;gap:10px;font-size:12px;')}>
+            <span style={css('font-weight:700;')}>
+              {t('cards.newCode')} · {t('cards.kept', { last4: one.last4 })}
+            </span>
+            <span style={css(MONO)}>{money(one.amount)}</span>
+          </div>
+          <div style={css('font-size:11px;color:var(--fg-muted);margin-top:2px;')}>{t('cards.printOnce')}</div>
+        </div>
+      ))}
+    </div>
+  );
+}

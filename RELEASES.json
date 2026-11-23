@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "releases": [
+    {
+      "name": "@adminiumjs/app-pos",
+      "version": "0.1.0",
+      "integrity": "sha512-CNoRsKmS6GYgjpGsw4wVV9wJIwfI0F1E3Cga0l4nslDnLNyFnZ8D879lNMlyZmSxxeIO1sqZYBzSPU6HtkyodQ==",
+      "publishedAt": "2026-09-20T14:14:12.000Z"
+    },
+    {
+      "name": "@adminiumjs/app-pos",
+      "version": "0.1.1",
+      "integrity": "sha512-kHZm4dApLLmPzZxDLGLUfcnaaRbmD3x0qPBSaeqQnE8G11vUYfySeeQkNsYJwKIJ1enbMu7VdWvQzc/su1zDuA==",
+      "publishedAt": "2026-09-20T17:42:04.000Z"
+    },
+    {
+      "name": "@adminiumjs/app-pos",
+      "version": "0.1.2",
+      "integrity": "sha512-rzOq+uWnfgnZ4vhI9+uLvE/Qw5weY6JZixMoRaF5KyUSDD68VcivKQpCnoP5O0IY/sjMejHQYbfsmWKoMHiYhg==",
+      "publishedAt": "2026-09-21T17:00:13.000Z"
+    },
+    {
+      "name": "@adminiumjs/app-pos",
+      "version": "0.2.0",
+      "integrity": "sha512-PjQMcbJFBRYKr1JyA2jNDECxZEwrBcDAtvBZPFjUs2aRUSCDv1d8G1ByCWrZs1ts+1ycwts7WyBRkmjLNslSCw==",
+      "publishedAt": "2026-09-23T16:50:20.000Z"
+    },
+    {
+      "name": "@adminiumjs/app-pos",
+      "version": "0.2.1",
+      "integrity": "sha512-d+dV1cieLob+ZGaHEAcZ46odhkQ97UBNXJEY/1d/oKWZpgcaGAednNPvfUGBGbv7XPNgDk+97EZQWWfl04jwTQ==",
+      "publishedAt": "2026-09-24T22:15:47.000Z"
+    },
+    {
+      "name": "@adminiumjs/app-pos",
+      "version": "0.2.2",
+      "integrity": "sha512-HYtcjcMeVpfjITNUCK9bwaDtLp2pF0BQNqrD8uwTOgzh6EHI21LHQ7bgOau526xMWddYtRJ/S8Dh4wlj3gz0nw==",
+      "publishedAt": "2026-09-25T15:34:35.000Z"
+    },
+    {
+      "name": "@adminiumjs/app-pos",
+      "version": "0.2.3",
+      "integrity": "sha512-z+4KkjKaEa4oIneBQ1irt0tJGXedrzeCMG6SZQFD80LRJZRnJNV2C3/hEEC9CSpwI8l8NsYMmwgQzooEW3fuug==",
+      "publishedAt": "2026-10-01T18:03:16.000Z"
+    },
+    {
+      "name": "@adminiumjs/app-pos",
+      "version": "0.3.0",
+      "integrity": "sha512-8cYymaAn7oE26QDDnlrnLv21IsfgGOViV3PdfFA2Zq8r1hfcxah6ATP6vpDpb67OxtXiqwjdwdamEzfiKCc3CQ==",
+      "publishedAt": "2026-10-09T06:02:36.000Z"
+    },
+    {
+      "name": "@adminiumjs/app-pos",
+      "version": "0.3.1",
+      "integrity": "sha512-i2ozAZ7JcXZFIDkdsSu4KMjaQZfXntgd/XiYDT0JFzTX8vUoKku2W1b4dB4EetLfgxshxh53zaK808QXrRaIQg==",
+      "publishedAt": "2026-10-27T23:23:37.000Z"
+    },
+    {
+      "name": "@adminiumjs/app-pos",
+      "version": "0.3.2",
+      "integrity": "sha512-vFhAYf8onhpXn7tvqEmwUdrWF0huy9Uwmxo4dZvhtyL+w6ipwO0BVVMm2EhLdhyXY4MGuN9oGer6MSWnmhC9IA==",
+      "publishedAt": "2026-11-07T08:40:27.000Z"
+    }
+  ]
+}

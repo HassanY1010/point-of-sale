@@ -1,0 +1,102 @@
+# Point of Sale — full self-host stack ("the full implementation").
+#
+#   POS terminal (SPA)   →  http://localhost:8080
+#   Adminium back-office →  http://localhost:4600
+#
+# `docker compose up` brings up:
+#   • pos-db   — Postgres 16, initialised with db/schema.sql + db/seed.sql
+#                (the real 25-item menu with real product images).
+#   • adminium — an Adminium instance pre-pointed at the seeded `pos` database;
+#                it imports that connection and AUTO-GENERATES the admin
+#                dashboard. Finish the ~1-minute setup wizard the first time.
+#   • web      — the POS terminal SPA (this repo, built + served by Caddy).
+#
+# The same menu (same items / prices / images) shows in the POS terminal and in
+# the auto-generated Adminium back-office, because both read the one `pos` DB.
+
+services:
+  pos-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: adminium
+      POSTGRES_PASSWORD: adminium
+      POSTGRES_DB: pos
+      # Load db/seed.sql on first boot? Set DEMO_DATA=0 in .env for an empty
+      # database with the same schema. `npm run demo:import` loads it later.
+      DEMO_DATA: ${DEMO_DATA:-1}
+    volumes:
+      # Postgres runs these in name order on an empty data dir: 01 creates the
+      # schema, 02 installs the demo-data bookkeeping, 03 loads the demo rows.
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./db/demo-toolkit.sql:/docker-entrypoint-initdb.d/02-demo-toolkit.sql:ro
+      - ./db/init-demo.sh:/docker-entrypoint-initdb.d/03-demo-seed.sh:ro
+      # Deliberately NOT in initdb.d: 03-demo-seed.sh decides whether to load
+      # it (DEMO_DATA) and records what it inserted, so the demo rows can be
+      # removed later without touching the schema or anything you added.
+      - ./db/seed.sql:/demo/seed.sql:ro
+      - pos-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U adminium -d pos"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  adminium:
+    image: ghcr.io/mosofi/adminium:latest
+    depends_on:
+      pos-db:
+        condition: service_healthy
+    environment:
+      # !!! PRODUCTION MUST OVERRIDE THIS. Set ADMINIUM_SECRET to a real 32-byte
+      # !!! hex string (e.g. `openssl rand -hex 32`) in your .env — see
+      # !!! .env.example. The default below is a throwaway for LOCAL DEV ONLY and
+      # !!! must never be shipped to a real deployment.
+      ADMINIUM_SECRET: ${ADMINIUM_SECRET:-devsecret-change-me-0000000000000000000000000000000000000000000000000000}
+      # Your database — the one the dashboard is generated FROM. On the first
+      # boot Adminium connects it, introspects the schema, and generates the
+      # pages; a bad DSN is reported and retried on the next boot instead of
+      # stopping it. It runs ONCE: a connection you delete later is not rebuilt.
+      ADMINIUM_SOURCE_URL: postgres://adminium:adminium@pos-db:5432/pos
+      ADMINIUM_DATA_DIR: /data
+      # Safe ONLY because this service publishes no ports (see below): every
+      # request arrives through this stack's own Caddy, so the forwarded client
+      # address is one Caddy wrote. Turn this on while 4600 is directly
+      # reachable and any caller can forge their source IP — out of the audit
+      # log and out of every per-IP limit.
+      ADMINIUM_TRUST_PROXY: "1"
+    volumes:
+      - adminium-data:/data
+    # No `ports:` — 4600 is NOT published from this service. It is reachable
+    # only on the compose network, through the `web` container's Caddy, and
+    # that is the precondition for the ADMINIUM_TRUST_PROXY set above.
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Connected mode. Unset — which is the default — builds the demo
+      # exactly as before; Vite inlines these, so they are build args and not
+      # `environment:`, and changing either needs `--build` to take effect.
+      # Mint the key in Studio -> Public API against a scope covering these refs:
+      # menuItems, restaurantTables, tickets, ticketItems, payments and
+      # shifts. NOTE: this repo has no staff table and no PIN column, so a
+      # connected build cannot be signed into — read
+      # src/data/adminiumSource.ts before deploying one.
+      args:
+        VITE_ADMINIUM_API_BASE_URL: ${VITE_ADMINIUM_API_BASE_URL:-}
+        VITE_ADMINIUM_PUBLISHABLE_KEY: ${VITE_ADMINIUM_PUBLISHABLE_KEY:-}
+    depends_on:
+      - adminium
+    ports:
+      - "8080:80"
+      # Adminium's back office, proxied by this container's Caddy (see
+      # ./Caddyfile). Upgrading an existing checkout? `docker compose up
+      # --build` — this port is served by an image built from that file.
+      - "4600:4600"
+    restart: unless-stopped
+
+volumes:
+  pos-db-data:
+  adminium-data:

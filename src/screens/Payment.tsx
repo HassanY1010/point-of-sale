@@ -1,0 +1,567 @@
+import { source } from '../data/source';
+import { cardState, isOffline, showsEstimate, usePos } from '../state/store';
+import type { PayMethod } from '../data/types';
+import {
+  chargeTarget,
+  discountAmt,
+  money,
+  paid,
+  remaining,
+  subtotal,
+  tableName,
+  tax,
+  tipAmt,
+  taxLabel,
+  tipFor,
+  total,
+} from '../state/calc';
+import { useT, type MessageKey } from '../i18n';
+import { Icon } from '../components/Icon';
+import { ReductionRows, TotalLabel, WhyOff } from '../components/Figures';
+import { css } from '../components/css';
+import { useEffect, type KeyboardEvent } from 'react';
+import { cardPanel, chargeRunning, qrPanel } from '../state/tillPay';
+import { LinkPanel, ReaderPanel, TerminalPanel, TestBand, splitWords } from './PayPanels';
+
+const MONO = "font-family:'JetBrains Mono',monospace;";
+
+const tipStyle = (on: boolean) =>
+  'flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;height:64px;border-radius:14px;border:1.5px solid ' +
+  (on ? 'var(--accent)' : 'var(--border-strong)') +
+  ';background:' +
+  (on ? 'var(--accent-soft)' : 'var(--surface)') +
+  ';color:' +
+  (on ? 'var(--accent)' : 'var(--fg)') +
+  ';cursor:pointer;';
+
+const methodStyle = (on: boolean) =>
+  'flex:1;display:flex;align-items:center;justify-content:center;gap:9px;height:60px;border-radius:15px;border:1.5px solid ' +
+  (on ? 'var(--accent)' : 'var(--border-strong)') +
+  ';background:' +
+  (on ? 'var(--accent-soft)' : 'var(--surface)') +
+  ';color:' +
+  (on ? 'var(--accent)' : 'var(--fg)') +
+  ';font-size:16px;font-weight:800;cursor:pointer;';
+
+const scStyle = (on: boolean) =>
+  'flex:1;min-width:76px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;height:58px;border-radius:14px;border:1.5px solid ' +
+  (on ? 'var(--accent)' : 'var(--border-strong)') +
+  ';background:' +
+  (on ? 'var(--accent-soft)' : 'var(--surface)') +
+  ';color:' +
+  (on ? 'var(--accent)' : 'var(--fg)') +
+  ';cursor:pointer;';
+
+const CASH_PAD: { t?: string; back?: boolean }[] = [
+  { t: '1' }, { t: '2' }, { t: '3' }, { t: '4' }, { t: '5' }, { t: '6' }, { t: '7' }, { t: '8' }, { t: '9' }, { t: '.' }, { t: '0' }, { back: true },
+];
+
+export function Payment() {
+  const s = usePos();
+  const t = useT();
+  const rem = remaining(s);
+  const paidv = paid(s);
+  const total_ = total(s);
+  const isCash = s.payMethod === 'cash';
+  const isCard = s.payMethod === 'card';
+  const isQr = s.payMethod === 'qr';
+  // How the card and QR tabs work here: the till's reader, a standalone terminal or the demo's animation; a pay link or "Mark paid".
+  const panel = cardPanel(s);
+  const qr = qrPanel(s);
+  const tipAside = s.tipBefore !== null && ((isCard && panel === 'reader') || (isQr && qr === 'link'));
+  const running = chargeRunning(s.charge);
+  // A pay link still open when the screen goes is closed with it: nobody pays a ticket the till no longer waits for.
+  useEffect(() => () => usePos.getState().closeLink(), []);
+  const back = () => {
+    if (chargeRunning(usePos.getState().charge)) {
+      s.showToast(t('reader.stillOn'), 'error');
+      return;
+    }
+    usePos.setState({ view: 'register' });
+  };
+  /*
+   * A gift card kept by Offers & gift cards (the till's cards, once moved):
+   * the card pays what ADMINIUM says it covers. The till asks first (a dry
+   * run), shows the answer, and then takes exactly that — never from its own
+   * memory of a balance, and never without a connection.
+   */
+  const giftTab = cardState(s) === 3;
+  const isGift = s.payMethod === 'gift_card' && giftTab;
+  const off = isOffline(s);
+  const estimate = showsEstimate(s);
+  const server = s.ticket.server;
+  // What is typed here is the store's (in memory only): no other payment is taken past a card that was typed.
+  const cardCode = s.cardDraft;
+  const setCardCode = s.setCardDraft;
+
+  const tend = parseFloat(s.cash || '0') || 0;
+  const target = chargeTarget(s);
+
+  // even-split ledger
+  const guests = s.mode !== 'retail' && s.ticket.seats ? s.ticket.seats : 0;
+  const evenNs = [2, 3, 4];
+  if (guests >= 2 && evenNs.indexOf(guests) < 0) evenNs.push(guests);
+  const evenActive = s.splitMode === 'even' && s.splitN > 0;
+  const base = s.splitN > 0 ? Math.round((total_ / s.splitN) * 100) / 100 : 0;
+  const payersPaid = evenActive ? Math.min(s.splitN, Math.round(paidv / (base || 1))) : 0;
+  const pips = Array.from({ length: s.splitN }, (_, pi) => pi < payersPaid);
+
+  const amountChipDefs: { l: string; f: number }[] = [
+    { l: '½', f: 0.5 },
+    { l: '⅓', f: 1 / 3 },
+    { l: '¼', f: 0.25 },
+  ];
+
+  const splitBadge = evenActive
+    ? t('payment.splitBadgeEven', { n: s.splitN })
+    : s.splitMode === 'amount'
+      ? t('payment.splitBadgeAmount', { amount: money(parseFloat(s.splitCustom) || 0) })
+      : '';
+  const ledgerText = evenActive
+    ? t('payment.ledger', {
+        i: Math.min(payersPaid + 1, s.splitN),
+        n: s.splitN,
+        amount: money(base),
+      })
+    : '';
+
+  // card
+  const cardTitle = t(
+    s.card === 'waiting'
+      ? 'payment.cardWaiting'
+      : s.card === 'reading'
+        ? 'payment.cardReading'
+        : s.card === 'approved'
+          ? 'payment.cardApproved'
+          : 'payment.declinedTitle',
+  );
+  const cardSub =
+    s.card === 'waiting'
+      ? t('payment.cardWaitingSub', { amount: money(rem) })
+      : s.card === 'reading'
+        ? t('payment.cardReadingSub')
+        : s.card === 'approved'
+          ? t('payment.cardApprovedSub')
+          : t('payment.cardDeclinedSub');
+  const cardBorder = s.card === 'approved' ? 'color-mix(in srgb, var(--pos) 45%, transparent)' : s.card === 'declined' ? 'color-mix(in srgb, var(--danger) 45%, transparent)' : 'var(--border)';
+  const cardIcon = s.card === 'approved' ? 'check-circle-2' : s.card === 'declined' ? 'x-circle' : 'credit-card';
+  const cardIconCol = s.card === 'approved' ? 'var(--pos)' : s.card === 'declined' ? 'var(--danger)' : 'var(--accent)';
+
+  // charge button
+  const chargeEnabled = isGift
+    ? !off && !s.paying && !s.cardPayBusy && (s.cardPay !== null || cardCode.trim() !== '')
+    : isCash
+      ? s.splitMode !== 'none'
+        ? tend >= target - 0.005
+        : tend > 0
+      : isCard
+        ? panel === 'reader'
+          ? !running && !off
+          : panel === 'terminal'
+            ? !s.paying && !s.slip.busy && s.slip.done === null
+            : s.card === 'waiting' || s.card === 'declined'
+        : true;
+  let chargeLabel: string;
+  let chargeIcon: string;
+  if (isGift) {
+    chargeIcon = 'gift';
+    chargeLabel = s.cardPay === null ? t('cards.check') : t('cards.use', { amount: money(s.cardPay.covers) });
+  } else if (isCard && panel === 'reader') {
+    chargeIcon = 'credit-card';
+    chargeLabel = t('reader.charge');
+  } else if (isCard && panel === 'terminal') {
+    chargeIcon = 'check';
+    chargeLabel = t('terminal.record', { amount: money(target) });
+  } else if (isCard) {
+    chargeIcon = s.card === 'declined' ? 'rotate-ccw' : 'credit-card';
+    chargeLabel =
+      s.card === 'reading'
+        ? t('payment.chargeReading')
+        : s.card === 'approved'
+          ? t('payment.cardApproved')
+          : s.card === 'declined'
+            ? t('payment.retryCard')
+            : t('payment.charge', { amount: money(target) });
+  } else if (isCash) {
+    chargeIcon = 'banknote';
+    chargeLabel =
+      tend <= 0
+        ? t('payment.enterCash')
+        : s.splitMode !== 'none'
+          ? t('payment.charge', { amount: money(target) })
+          : tend >= rem
+            ? t('payment.charge', { amount: money(rem) })
+            : t('payment.addPartial', { amount: money(tend) });
+  } else {
+    chargeIcon = 'check';
+    chargeLabel = t('payment.markPaid', { amount: money(target) });
+  }
+
+  // The tabs, in today's order; arrow keys move between them (mirrored in a right-to-left language).
+  const tabs = [
+    { m: 'cash', l: 'common.cash', ic: 'banknote' },
+    { m: 'card', l: 'common.card', ic: 'credit-card' },
+    { m: 'qr', l: 'payment.qr', ic: 'qr-code' },
+    ...(giftTab ? [{ m: 'gift_card', l: 'gift.method', ic: 'gift' }] : []),
+  ] as { m: PayMethod; l: MessageKey; ic: string }[];
+  const tabKey = (e: KeyboardEvent, i: number) => {
+    const rtl = document.documentElement.dir === 'rtl';
+    const step = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+    const to = e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : step === 0 ? -1 : (i + (rtl ? -step : step) + tabs.length) % tabs.length;
+    if (to < 0) return;
+    e.preventDefault();
+    const next = tabs[to]!;
+    s.setMethod(next.m);
+    document.getElementById(`pay-tab-${next.m}`)?.focus();
+  };
+
+  // The bar: the reader's Charge only before a charge and after one was cancelled; a pay link has its own buttons.
+  const bar =
+    isCard && panel === 'reader'
+      ? s.charge === null || (!running && s.charge.phase !== 'approved' && s.charge.phase !== 'recording' && s.charge.phase !== 'declined')
+      : !(isQr && qr === 'link');
+
+  // cash presets
+  const r5 = Math.ceil(rem / 5) * 5;
+  const r10 = Math.ceil(rem / 10) * 10;
+  const pres: { label: string; v: number }[] = [{ label: t('payment.exact'), v: Math.round(rem * 100) / 100 }];
+  if (r5 > rem) pres.push({ label: money(r5), v: r5 });
+  if (r10 > rem && r10 !== r5) pres.push({ label: money(r10), v: r10 });
+  if (50 > rem && pres.length < 4) pres.push({ label: money(50), v: 50 });
+  if (100 > rem && pres.length < 4) pres.push({ label: money(100), v: 100 });
+  const cashPresets = pres.slice(0, 4);
+
+  return (
+    <div style={css('flex:1;min-height:0;display:flex;flex-direction:column;background:var(--bg);')}>
+      <header style={css('flex-shrink:0;min-height:70px;display:flex;align-items:center;gap:14px;padding:0 18px;background:var(--surface);border-bottom:1px solid var(--border);')}>
+        <button className="pos-press" onClick={back} style={css('display:flex;align-items:center;gap:9px;height:50px;padding:0 16px 0 12px;border-radius:14px;border:1px solid var(--border-strong);background:var(--surface);color:var(--fg);font-size:15px;font-weight:700;cursor:pointer;')}>
+          <Icon name="arrow-left" size={19} />
+          {t('payment.back')}
+        </button>
+        <div>
+          <div style={css('font-size:18px;font-weight:800;letter-spacing:-.02em;')}>{t('payment.title')}</div>
+          <div style={css('font-size:12.5px;color:var(--fg-muted);margin-top:2px;')}>
+            {t('payment.subtitle', { n: s.ticket.number, table: tableName(s.ticket.table, s.mode) })}
+          </div>
+        </div>
+      </header>
+
+      {s.payments.test && s.connected && <TestBand />}
+
+      {isCard && panel === 'demo' && s.card === 'declined' && (
+        <div style={css('flex-shrink:0;display:flex;align-items:center;gap:12px;margin:14px 18px 0;padding:14px 16px;border-radius:14px;background:var(--danger-soft);border:1px solid color-mix(in srgb, var(--danger) 35%, transparent);color:var(--danger);')}>
+          <Icon name="x-circle" size={22} />
+          <div style={css('flex:1;')}>
+            <div style={css('font-size:14.5px;font-weight:800;')}>{t('payment.declinedTitle')}</div>
+            <div style={css('font-size:12.5px;font-weight:600;opacity:.85;')}>{t('payment.declinedHint')}</div>
+          </div>
+        </div>
+      )}
+
+      <div className="pay-body">
+        {/* LEFT: summary rail */}
+        <div className="pos-scroll pay-summary">
+          <div style={css('font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--fg-subtle);')}>{t(paidv > 0 ? 'payment.remainingBalance' : 'payment.balanceDue')}</div>
+          <div style={css('font-size:64px;font-weight:800;' + MONO + 'letter-spacing:-.03em;line-height:1;margin:6px 0 2px;')}>{money(rem)}</div>
+
+          {s.splits.length > 0 && (
+            <div style={css('margin-top:16px;display:flex;flex-direction:column;gap:8px;')}>
+              {s.splits.map((sp, i) => (
+                <div key={i} style={css('display:flex;align-items:center;gap:10px;padding:12px 14px;border-radius:13px;background:var(--surface);border:1px solid var(--border);')}>
+                  <Icon name={sp.method === 'cash' ? 'banknote' : sp.method === 'card' ? 'credit-card' : sp.method === 'gift_card' ? 'gift' : sp.method === 'online' ? 'globe' : 'qr-code'} size={17} color="var(--pos)" />
+                  <span style={css('font-size:14px;font-weight:700;min-width:0;')}>
+                    {sp.method === 'gift_card'
+                      ? sp.cardLeft === undefined
+                        ? t('gift.paidFrom', { code: sp.reference ?? '' })
+                        : t('cards.kept', { last4: sp.reference ?? '' })
+                      : (splitWords(t, sp) ?? t(sp.method === 'cash' ? 'common.cash' : sp.method === 'card' ? 'common.card' : 'payment.qrPay'))}
+                    {/* What one of Offers' cards held after it paid, as Adminium answered. */}
+                    {sp.method === 'gift_card' && sp.cardLeft !== undefined && (
+                      <span data-card-left="" style={css('display:block;font-size:12px;font-weight:600;color:var(--fg-muted);')}>{t('cards.leftOnIt', { amount: money(sp.cardLeft) })}</span>
+                    )}
+                  </span>
+                  <span style={css('margin-inline-start:auto;' + MONO + 'font-weight:700;')}>{money(sp.amount)}</span>
+                  <Icon name="check" size={16} color="var(--pos)" />
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={css('margin-top:24px;font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;color:var(--fg-subtle);margin-bottom:11px;')}>{t('common.tip')}</div>
+          {tipAside ? (
+            <div data-tip-aside="" style={css('display:flex;align-items:center;gap:10px;height:64px;padding:0 16px;border-radius:14px;border:1.5px dashed var(--border-strong);color:var(--fg-muted);font-size:14.5px;font-weight:700;')}>
+              <Icon name={isCard ? 'smartphone' : 'qr-code'} size={18} />
+              {t(isCard ? 'reader.chosenOnReader' : 'link.noTip')}
+            </div>
+          ) : (
+          <div style={css('display:flex;gap:8px;')}>
+            {/* The buttons ARE the venue's presets (`settings.tip_presets`): the label and
+                the amount under it come from the same number, never a 10/15/20 written here. */}
+            {source.tipPresets().map((p, i) => ({ l: p === 0 ? t('payment.noTip') : t('payment.tipPct', { pct: Math.round(p * 1000) / 10 }), i, p })).map((x) => (
+              <button key={x.i} className="pos-press" onClick={() => s.setTip(x.i)} style={css(tipStyle(s.tip === x.i))}>
+                <span style={css('font-size:15px;font-weight:800;')}>{x.l}</span>
+                {/* `tipFor`, not `subtotal * TIP_PRESETS[i]` — the tip is
+                    assessed on the discounted goods, so the second spelling
+                    quoted a figure the Tip row below contradicted. */}
+                {x.p > 0 && <span style={css('font-size:12px;' + MONO + 'opacity:.7;margin-top:2px;')}>{money(tipFor(s, x.i))}</span>}
+              </button>
+            ))}
+            {/* Custom: the customer display's pad (the same buttons on both). */}
+            <button className="pos-press" onClick={s.openTipPad} style={css(tipStyle(s.tip === 'c'))}>
+              <span style={css('font-size:15px;font-weight:800;')}>{t('display.custom')}</span>
+              {s.tip === 'c' && tipAmt(s) > 0 && <span style={css('font-size:12px;' + MONO + 'opacity:.7;margin-top:2px;')}>{money(tipAmt(s))}</span>}
+            </button>
+          </div>
+          )}
+
+          <div style={css('margin-top:22px;display:flex;align-items:center;gap:8px;font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;color:var(--fg-subtle);margin-bottom:11px;')}>
+            {t('payment.splitBill')}
+            {s.splitMode !== 'none' && (
+              <>
+                <span style={css('font-size:11px;font-weight:800;padding:2px 9px;border-radius:20px;background:var(--accent-soft);color:var(--accent);' + MONO + 'text-transform:none;letter-spacing:0;')}>{splitBadge}</span>
+                <button className="pos-press" onClick={s.clearSplit} style={css('margin-inline-start:auto;font-size:11.5px;font-weight:700;border:none;background:transparent;color:var(--fg-muted);cursor:pointer;text-transform:none;letter-spacing:0;')}>{t('common.clear')}</button>
+              </>
+            )}
+          </div>
+          <div style={css('font-size:11.5px;font-weight:700;color:var(--fg-subtle);margin-bottom:7px;')}>{t('payment.splitEvenly')}</div>
+          <div style={css('display:flex;gap:8px;flex-wrap:wrap;')}>
+            {evenNs.map((n) => {
+              const sh = Math.round((total_ / n) * 100) / 100;
+              const on = s.splitMode === 'even' && s.splitN === n;
+              return (
+                <button key={n} className="pos-press" onClick={() => s.setSplitN(n)} style={css(scStyle(on))}>
+                  <span style={css('font-size:14.5px;font-weight:800;')}>
+                    {guests === n && n > 4 ? t('payment.guestsN', { n }) : t('payment.nWays', { n })}
+                  </span>
+                  <span style={css('font-size:11.5px;' + MONO + 'opacity:.7;')}>{t('payment.each', { amount: money(sh) })}</span>
+                </button>
+              );
+            })}
+          </div>
+          {evenActive && (
+            <div style={css('margin-top:12px;padding:14px 15px;border-radius:14px;background:var(--surface);border:1px solid var(--border);')}>
+              <div style={css('display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:11px;')}>
+                <span style={css('font-size:13.5px;font-weight:800;')}>{ledgerText}</span>
+                <span style={css('font-size:12.5px;font-weight:800;' + MONO + 'color:var(--accent);white-space:nowrap;')}>{t('payment.thisCharge', { amount: money(target) })}</span>
+              </div>
+              <div style={css('display:flex;gap:5px;')}>
+                {pips.map((filled, pi) => (
+                  <span key={pi} style={css('flex:1;height:8px;border-radius:20px;background:' + (filled ? 'var(--accent)' : 'var(--surface-3)') + ';')} />
+                ))}
+              </div>
+            </div>
+          )}
+          <div style={css('font-size:11.5px;font-weight:700;color:var(--fg-subtle);margin:14px 0 7px;')}>{t('payment.chargePart')}</div>
+          <div style={css('display:flex;gap:8px;flex-wrap:wrap;')}>
+            {amountChipDefs.map((x) => {
+              const v = Math.round(rem * x.f * 100) / 100;
+              const on = s.splitMode === 'amount' && Math.abs((parseFloat(s.splitCustom) || 0) - v) < 0.005;
+              return (
+                <button key={x.l} className="pos-press" onClick={() => s.setSplitFraction(x.f)} style={css(scStyle(on))}>
+                  <span style={css('font-size:16px;font-weight:800;')}>{x.l}</span>
+                  <span style={css('font-size:11.5px;' + MONO + 'opacity:.7;')}>{money(v)}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          <div style={css('margin-top:24px;padding-top:16px;border-top:1px dashed var(--border-strong);display:flex;flex-direction:column;gap:9px;')}>
+            <Row label={t('common.subtotal')} value={money(subtotal(s))} />
+            {/* Without this row the summary printed Subtotal + Tax + Tip beside
+                a Total that had the discount taken off — four numbers that did
+                not add up. The register pane has always shown it. */}
+            {server !== undefined && server.applied.length > 0 ? (
+              <ReductionRows lines={server.applied} />
+            ) : (
+              !!s.discount && <Row label={s.discount.label} value={'−' + money(discountAmt(s))} />
+            )}
+            <Row label={taxLabel()} value={money(tax(s))} />
+            <Row label={t('common.tip')} value={money(tipAmt(s))} />
+            <div style={css('display:flex;justify-content:space-between;font-size:16px;padding-top:9px;border-top:1px solid var(--border);')}>
+              <TotalLabel estimate={estimate} style="font-size:16px;font-weight:800;" />
+              <span style={css(MONO + 'font-weight:800;')}>{money(total_)}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* RIGHT: method pane */}
+        <div style={css('flex:1;min-width:0;display:flex;flex-direction:column;')}>
+          <div role="tablist" aria-label={t('payment.howPay')} style={css('flex-shrink:0;display:flex;gap:10px;padding:20px 22px 0;')}>
+            {tabs.map((x, i) => {
+              // The gift card tab is off without a connection: the card's money is never the till's to guess.
+              const dead = x.m === 'gift_card' && off;
+              const on = s.payMethod === x.m;
+              return (
+                <button
+                  key={x.m}
+                  id={`pay-tab-${x.m}`}
+                  role="tab"
+                  aria-selected={on}
+                  aria-controls="pay-panel"
+                  tabIndex={on ? 0 : -1}
+                  data-method={x.m}
+                  className="pos-press"
+                  disabled={dead}
+                  onClick={() => s.setMethod(x.m)}
+                  onKeyDown={(e) => tabKey(e, i)}
+                  style={css(methodStyle(on) + (dead ? 'opacity:.5;cursor:not-allowed;' : ''))}
+                >
+                  <Icon name={x.ic} size={20} />
+                  {/* Four tabs across a phone: the gift card's takes its short name there. */}
+                  {x.m === 'gift_card' ? (
+                    <>
+                      <span className="pay-method-long">{t(x.l)}</span>
+                      <span className="pay-method-short">{t('gift.methodShort')}</span>
+                    </>
+                  ) : (
+                    t(x.l)
+                  )}
+                </button>
+              );
+            })}
+          </div>
+          {giftTab && off && (
+            <div style={css('padding:0 22px;')}>
+              <WhyOff>{t('cards.offline')}</WhyOff>
+            </div>
+          )}
+
+          <div id="pay-panel" role="tabpanel" aria-labelledby={`pay-tab-${s.payMethod}`} className="pos-scroll" style={css('flex:1;min-height:0;overflow-y:auto;padding:20px 22px;')}>
+            {isCash && (
+              <div style={css('display:flex;gap:20px;flex-wrap:wrap;')}>
+                <div style={css('flex:1;min-width:220px;')}>
+                  <div style={css('display:flex;flex-direction:column;gap:10px;margin-bottom:16px;')}>
+                    <div style={css('display:flex;justify-content:space-between;align-items:baseline;padding:15px 16px;border-radius:15px;background:var(--surface);border:1px solid var(--border);')}>
+                      <span style={css('font-size:13px;font-weight:700;color:var(--fg-muted);')}>{t('payment.tendered')}</span>
+                      <span style={css('font-size:28px;font-weight:800;' + MONO)}>{money(tend)}</span>
+                    </div>
+                    <div style={css('display:flex;justify-content:space-between;align-items:baseline;padding:15px 16px;border-radius:15px;background:var(--pos-soft);')}>
+                      <span style={css('font-size:13px;font-weight:700;color:var(--pos);')}>{t('payment.changeDue')}</span>
+                      <span style={css('font-size:28px;font-weight:800;' + MONO + 'color:var(--pos);')}>{money(tend > target ? tend - target : 0)}</span>
+                    </div>
+                  </div>
+                  <div style={css('display:flex;flex-wrap:wrap;gap:8px;')}>
+                    {cashPresets.map((cp) => (
+                      <button key={cp.label} data-cash-preset={String(cp.v)} className="pos-press" onClick={() => s.cashPreset(cp.v)} style={css('flex:1;min-width:86px;height:50px;border-radius:12px;border:1px solid var(--border-strong);background:var(--surface-2);color:var(--fg);font-size:14px;font-weight:700;' + MONO + 'cursor:pointer;')}>
+                        {cp.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div style={css('width:264px;')}>
+                  <div style={css('display:grid;grid-template-columns:repeat(3,1fr);gap:9px;')}>
+                    {CASH_PAD.map((k, i) => (
+                      <button key={i} className="pos-press" onClick={() => s.cashPush(k.back ? 'back' : (k.t as string))} aria-label={k.back ? t('login.backspace') : k.t} style={css('height:60px;border-radius:13px;border:1px solid var(--border);background:var(--surface);color:var(--fg);font-size:23px;font-weight:700;' + MONO + 'cursor:pointer;display:flex;align-items:center;justify-content:center;')}>
+                        {k.back ? <Icon name="delete" size={21} /> : k.t}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {isCard && panel === 'reader' && <ReaderPanel amount={target} />}
+            {isCard && panel === 'terminal' && <TerminalPanel amount={target} />}
+            {isCard && panel === 'demo' && (
+              <div style={css('max-width:460px;margin:8px auto;text-align:center;')}>
+                <div style={css('padding:38px 30px;border-radius:22px;border:1.5px solid ' + cardBorder + ';background:var(--surface);' + (s.card === 'waiting' ? 'animation:pos-cardglow 2.2s infinite;' : ''))}>
+                  <Icon name={cardIcon} size={48} color={cardIconCol} />
+                  <div style={css('font-size:20px;font-weight:800;margin-top:16px;letter-spacing:-.01em;')}>{cardTitle}</div>
+                  <div style={css('font-size:13.5px;color:var(--fg-muted);margin-top:6px;')}>{cardSub}</div>
+                  {s.card === 'reading' && <div style={css('width:34px;height:34px;border:3px solid var(--surface-3);border-top-color:var(--accent);border-radius:50%;animation:pos-spin .8s linear infinite;margin:18px auto 0;')} />}
+                </div>
+                {/* The demo's reader is this animation, and says so. */}
+                <div style={css('margin-top:14px;font-size:12.5px;color:var(--fg-subtle);')}>{t('payment.cardDemo')}</div>
+                <div style={css('display:flex;align-items:center;justify-content:center;gap:8px;margin-top:16px;font-size:12.5px;color:var(--fg-subtle);')}>
+                  <Icon name="shield-check" size={15} />
+                  {t('payment.encrypted')}
+                </div>
+              </div>
+            )}
+
+            {isGift && (
+              <div style={css('max-width:460px;margin:8px auto;')}>
+                <form
+                  data-card-form=""
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void s.quoteCard(cardCode);
+                  }}
+                  style={css('display:flex;gap:10px;')}
+                >
+                  <input
+                    value={cardCode}
+                    onChange={(e) => {
+                      setCardCode(e.target.value);
+                    }}
+                    placeholder={t('cards.codeLabel')}
+                    aria-label={t('cards.codeLabel')}
+                    autoComplete="off"
+                    disabled={off}
+                    style={css('flex:1;min-width:0;height:56px;padding:0 15px;border-radius:14px;border:1px solid var(--border-strong);background:var(--surface);color:var(--fg);font-size:16px;font-weight:700;letter-spacing:.04em;outline:none;' + MONO)}
+                  />
+                  <button type="submit" className="pos-press" disabled={off || s.cardPayBusy || cardCode.trim() === ''} style={css('height:56px;padding:0 18px;border-radius:14px;border:1px solid var(--border-strong);background:var(--surface);color:var(--fg);font-family:inherit;font-size:15px;font-weight:800;cursor:pointer;')}>
+                    {t(s.cardPayBusy ? 'offers.checking' : 'cards.check')}
+                  </button>
+                </form>
+                {s.cardPay !== null && (
+                  <div role="status" data-card-covers="" style={css('margin-top:16px;padding:22px;border-radius:18px;border:1.5px solid color-mix(in srgb, var(--pos) 45%, transparent);background:var(--surface);text-align:center;')}>
+                    <Icon name="gift" size={34} color="var(--pos)" />
+                    <div style={css('font-size:13.5px;font-weight:700;color:var(--fg-muted);margin-top:8px;')}>{t('cards.kept', { last4: s.cardPay.code.trim().slice(-4) })}</div>
+                    <div style={css('font-size:20px;font-weight:800;margin-top:4px;')}>{t('cards.covers', { amount: money(s.cardPay.covers) })}</div>
+                    {/* What is then still owing is Adminium's figure too, from the same dry run. */}
+                    {s.cardPay.due > 0 && (
+                      <div data-card-rest="" style={css('font-size:13.5px;color:var(--fg-muted);margin-top:6px;')}>
+                        {t('cards.leftToPay', { amount: money(s.cardPay.due) })} · {t('cards.coversRest')}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {s.cardPayWords !== null && (
+                  <div role="alert" style={css('margin-top:16px;padding:14px 16px;border-radius:14px;background:var(--danger-soft);color:var(--danger);font-size:14.5px;font-weight:700;')}>
+                    {s.cardPayWords}
+                  </div>
+                )}
+                <div style={css('margin-top:14px;font-size:12.5px;color:var(--fg-subtle);text-align:center;')}>{t('cards.notTip')}</div>
+              </div>
+            )}
+
+            {isQr && qr === 'link' && <LinkPanel />}
+            {isQr && qr === 'mark' && (
+              <div style={css('max-width:420px;margin:8px auto;text-align:center;')}>
+                <div style={css('width:224px;height:224px;margin:0 auto;border-radius:22px;background:var(--surface);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;box-shadow:var(--shadow);')}>
+                  <Icon name="qr-code" size={156} color="var(--fg)" />
+                </div>
+                <div style={css('font-size:19px;font-weight:800;margin-top:18px;')}>{t('payment.scanToPay', { amount: money(rem) })}</div>
+                <div style={css('font-size:13.5px;color:var(--fg-muted);margin-top:6px;line-height:1.5;')}>{t('payment.qrHint')}</div>
+              </div>
+            )}
+          </div>
+
+          {bar && (
+          <div style={css('flex-shrink:0;padding:16px 22px;border-top:1px solid var(--border);background:var(--surface);')}>
+            <button
+              data-charge=""
+              className="pos-press"
+              onClick={s.onCharge}
+              style={css('width:100%;height:68px;border-radius:17px;border:none;background:' + (chargeEnabled ? 'var(--accent)' : 'var(--surface-3)') + ';color:' + (chargeEnabled ? 'var(--accent-fg)' : 'var(--fg-subtle)') + ';font-size:19px;font-weight:800;cursor:' + (chargeEnabled ? 'pointer' : 'not-allowed') + ';display:flex;align-items:center;justify-content:center;gap:11px;')}
+            >
+              <Icon name={chargeIcon} size={22} />
+              {chargeLabel}
+            </button>
+          </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Row({ label, value }: { label: string; value: string }) {
+  return (
+    <div style={css('display:flex;justify-content:space-between;font-size:14px;')}>
+      <span style={css('color:var(--fg-muted);font-weight:600;')}>{label}</span>
+      <span style={css("font-family:'JetBrains Mono',monospace;font-weight:600;")}>{value}</span>
+    </div>
+  );
+}

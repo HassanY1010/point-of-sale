@@ -1,0 +1,9 @@
+node_modules
+dist
+dist-surface
+*.tsbuildinfo
+.DS_Store
+*.local
+.vercel
+.env
+test-results

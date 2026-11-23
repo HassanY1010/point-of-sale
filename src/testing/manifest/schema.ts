@@ -1,0 +1,4873 @@
+/*
+ * VENDORED VERBATIM from packages/manifest/src/schema.ts.
+ * Never hand-edit this copy: change the monorepo package and re-run
+ * `node scripts/sync-manifest-validator.mjs`.
+ *
+ * WHY A COPY. `@adminium/manifest` is not published to npm and this app is a
+ * standalone repo that must build from a clean clone, so it cannot depend on
+ * the monorepo. It lives under `testing/` because `zod` is a devDependency
+ * here and a runtime dependency the host does not carry — nothing in
+ * the shipped bundle's import graph may reach it, which sources.test.ts gates.
+ *
+ * The only edits are import specifiers: `.js` becomes `.ts`, and the
+ * `@adminium/add-on-contracts` package import becomes relative ones.
+ */
+/**
+ * Manifest spec v1, frozen at `manifestVersion: 1` for all of Adminium 1.x.
+ * Pure Zod v4 + types — no `node:` imports — so the storefront and the
+ * Electron shell can validate a manifest in the browser.
+ *
+ * This module is the envelope: every block's shape and the cross-block rules.
+ * The install PLANNER (planInstall / requiredSchema → create-or-map diff) and
+ * the server-side installer are later layers that consume a validated manifest.
+ */
+
+import { addOnBlockSchema, addOnCategorySchema, type AddOnBlock } from './add-on-block.ts';
+import { i18nMessageSchema, type I18nMessage } from './common.ts';
+import { recordPanelIssues } from './record-panels.ts';
+import { recordTabIssues, type RecordTabTable } from './record-tabs.ts';
+import { isSlotId } from './slots.ts';
+import type { AddOnStep } from './add-on-steps.ts';
+import { z } from 'zod';
+
+import { addOnNeedsIssues, addOnsSchema, requiresAddOn, type AddOnNeeds } from './add-ons.ts';
+import { NAV_LINK_SCREENS, RECORD_ADDRESS_MESSAGE, SIDE_PATH_MESSAGE, isRecordAddress, isSidePath, railIssues } from './rail.ts';
+import { addOnModuleIssues, moduleIdSchema, moduleIssues, modulesSchema, optionalShapeAddOns, roleNamesSchema, shapeIsOptional, withoutModules } from './modules.ts';
+import { bookingIssues, bookingSchema } from './booking.ts';
+import { occupiesIssues, occupiesSchema } from './occupies.ts';
+import { columnHistorySchema, removalIssues, removalSchema } from './removal.ts';
+import { capacityIssues, capacitySchema, isLegacyCapacity, kindOf, rulesOf, viaIndexIssues, type Capacity } from './capacity.ts';
+import { appDocumentIssues, appDocumentSchema, mappingIssues, type AppDocument } from './documents.ts';
+import { formulaColumns, formulaExprSchema, tableFormulaIssues } from './formula.ts';
+import { lookUpIssues, lookUpSchema, type LookUp, type LookUpTable } from './look-up.ts';
+import { pageBoardIssues } from './page-board.ts';
+import { pageCalendarIssues } from './page-calendar.ts';
+import { pageConfigIssues } from './page-config.ts';
+import { emailTemplateSchema, outboxIssues, outboxProducerSchema, outboxSchema } from './outbox.ts';
+import { FORMS_KEY, codeWhereSchema, personalColumn, plainTextMax, plainTextRef, publicAccessIssues, publicAccessSchema, publicKeysSchema, shareCodeColumns, unlistedColumn, type PublicAccess } from './public-access.ts';
+import { appGrantsIssues, appGrantsSchema, roleTableHold, type AppGrantTableShape, type RoleTableHold } from './app-grants.ts';
+import { belongsIssues, belongsSchema, privateTableIssues, roleAddOnTableIssues, roleAddOnTablesSchema, type RoleAddOnTable, roleLimitIssues, roleLimitsSchema, rowTablesOf, type RoleShape, privateShapeIssues, storedTotalIssues } from './roles.ts';
+import { conditionIssues, stateConditionSchema, statesIssues, statesSchema, type States } from './states.ts';
+import { MOMENT_LIMITS, clockTimeSchema, momentIssues, momentSchema, settingRefSchema } from './refs.ts';
+import {
+  NUMERIC_TYPES,
+  SNAKE_REF,
+  isRef,
+  labelsSchema,
+  refSchema,
+  scalarSchema,
+  settingSourceSchema,
+  tableIndex,
+  textOrLabels,
+  valueFits,
+  type ReferenceIssue,
+  type SettingSource,
+  type TableIndex,
+} from './refs.ts';
+import { compareSemver, parseSemverRange } from './semver.ts';
+import { appIconSchema, pageEnvelopeFieldSchema, pageViewsSchema, provenanceSchema, savedAppIssues } from './saved-apps.ts';
+import { appsBlockSchema, requiredAppIssues } from './app-requires.ts';
+import { instanceIssues, instanceSchema } from './instance.ts';
+import { assistantIssues, type AssistantTableShape } from './assistant.ts';
+import { stepsIssues, type StepTableShape } from './steps.ts';
+import { WORD_FLOORS, installFloorWords } from './words.ts';
+import { savedPartsIssues, savedPartsShape } from './saved-parts.ts';
+import { tableNameIssue, tableSchemaIssue } from './table-names.ts';
+import { mailClassFloorIssues } from './mail-class.ts';
+import { keepSchema, peopleIssues, peopleSchema, publicConsentIssues } from './people.ts';
+import { expireIssues, expireSchema } from './expire.ts';
+import { automationIssues, manifestAutomationsSchema, type AutomationTableShape, type ManifestAutomation } from './automations.ts';
+import { changeGuardIssues, changeGuardsSchema } from './change-guards.ts';
+import { adjustDecidedColumns, adjustIssues, adjustSchema, adjusterIssues, adjusterSchema, type Adjuster, type AdjustTableShape } from './adjust.ts';
+import { checkIssues, checkSchema, checkerIssues, checkerSchema, type Checker, type CheckTableShape } from './check.ts';
+import { ledgerIssues, ledgersSchema, postingIssues, postingsSchema, receiptTableIssues, wordsIssues, wordsListSchema, type Ledger, type LedgerScopeTable, type LedgerTableShape, type StockWords } from './ledgers.ts';
+import { addOnFormsSchema, formsBlockIssues, type AddOnForms, type FormsTableShape } from './forms.ts';
+
+export { compareSemver };
+
+/** Integer spec version, frozen at 1 for Adminium 1.x. */
+export const MANIFEST_VERSION = 1;
+
+/**
+ * What kind of thing this manifest describes. OPTIONAL, defaulting to `"app"` —
+ * which is the whole reason `manifestVersion` does not move: every manifest
+ * written before wave 4 stays valid unchanged, and an additive optional field
+ * with a back-compatible default is how a frozen spec grows without lying about
+ * its version.
+ */
+export const MANIFEST_KINDS = ['app', 'add-on'] as const;
+export const manifestKindSchema = z.enum(MANIFEST_KINDS);
+export type ManifestKind = (typeof MANIFEST_KINDS)[number];
+
+/** strict semver — `major.minor.patch` with optional pre-release/build. */
+const SEMVER =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+const semver = z.string().regex(SEMVER, 'must be strict semver (major.minor.patch)');
+
+/**
+ * An i18n message: a catalog key plus the English fallback rendered if absent.
+ *
+ * DEFINED IN `@adminium/add-on-contracts` since 51a and re-exported here under
+ * its own name, so every importer of `@adminium/manifest` is unchanged. It
+ * moved because an add-on's page title and nav-group label are written in a
+ * manifest and read by a host through the contracts package — one shape, one
+ * definition, rather than two that drift a `max()` apart.
+ */
+export { i18nMessageSchema, type I18nMessage };
+
+// ── identity ─────────────────────────────────────────────────────────────────
+
+/** Closed v1 storefront facet set. */
+export const MANIFEST_CATEGORIES = [
+  'commerce',
+  'hospitality',
+  'operations',
+  'crm',
+  'internal-tools',
+] as const;
+export const categorySchema = z.enum(MANIFEST_CATEGORIES);
+
+/** The one publisher id v1 accepts unless `third-party-publishers` is on. */
+export const FIRST_PARTY_PUBLISHER_ID = 'adminium';
+
+/**
+ * The publisher id of an app made on the install it runs on: written in a
+ * project folder and installed from a file, never from a catalogue. Accepted
+ * only where the caller says so, and only for an app.
+ */
+export const LOCAL_PUBLISHER_ID = 'local';
+
+export const publisherSchema = z
+  .object({
+    id: z.string().regex(/^[a-z][a-z0-9-]{1,39}$/, 'publisher id must be ^[a-z][a-z0-9-]{1,39}$'),
+    name: z.string().min(1).max(80),
+    url: z.url().max(200).optional(),
+  })
+  .strict();
+export type Publisher = z.infer<typeof publisherSchema>;
+
+/**
+ * Everything both kinds share. `categories` is deliberately NOT here: it splits
+ * by kind (an add-on is not a vertical), so each branch adds its own.
+ */
+export const identityShape = {
+  key: z.string().regex(/^[a-z][a-z0-9-]{1,79}$/, 'key must be ^[a-z][a-z0-9-]{1,79}$'),
+  name: z.string().min(1).max(80),
+  version: semver,
+  publisher: publisherSchema,
+  // SPDX id — the FRONTEND's license (informational; core is AGPL-3.0).
+  license: z.string().min(1).max(80),
+  description: i18nMessageSchema,
+};
+
+export const identitySchema = z
+  .object({
+    ...identityShape,
+    categories: z.array(categorySchema).min(1),
+  })
+  .strict();
+
+/**
+ * Keys no app or add-on may ever take, because they would shadow a storefront
+ * route or a data file. Apps and add-ons share one key namespace.
+ *
+ * `dashboard` joined them for a different reason: it is the HOST KEY a stock
+ * Adminium deployment attaches an add-on under, so an add-on `attaches:
+ * [{app: '*'}]` resolves against it and the consent dialog has something to
+ * enable and disable. Treating an empty `attachTo` as "the dashboard" was the
+ * alternative and leaves nothing to switch off. Reserving the literal means
+ * no app can also be called `dashboard` and make an attachment ambiguous.
+ */
+export const RESERVED_KEYS = [
+  'apps',
+  'add-on',
+  'add-ons',
+  'dashboard',
+  'demo',
+  'index',
+  'search',
+] as const;
+
+// ── capabilities ─────────────────────────────────────────────────────────────
+
+export const MANIFEST_CAPABILITIES = [
+  'hosted-only',
+  'offline-required',
+  'receipt-printer',
+  'barcode-scanner',
+  'payments',
+  'file-storage',
+  'email-delivery',
+  'realtime',
+  // Added by wave 4. Adding a capability key is a THREE-place change
+  // and all three land together: here, `CAP_ICONS` in the website's
+  // marketplace data (note `CAP_META` derives from it), and a
+  // `marketplaceData.cap.<key>` label in all eight locales.
+  /** The add-on's server code calls a third-party API. */
+  'outbound-http',
+  /** The host runs an OAuth 2.0 authorization-code flow on the add-on's behalf. */
+  'oauth-connect',
+] as const;
+export const capabilitySchema = z.enum(MANIFEST_CAPABILITIES);
+export type Capability = z.infer<typeof capabilitySchema>;
+
+// ── compatibility ────────────────────────────────────────────────────────────
+
+/** The three meta/data engines Adminium can talk to. */
+export const MANIFEST_ENGINES = ['postgres', 'mysql', 'sqlite'] as const;
+
+export const compatibilitySchema = z
+  .object({
+    minAdminiumVersion: semver,
+    maxAdminiumVersion: semver.optional(), // exclusive upper bound
+    /**
+     * Which data engines this app's `requiredSchema` actually works on.
+     *
+     * ADDED rather than dropped from the manifests. Thirteen shipped manifests
+     * already carried `engines` and this `.strict()` schema rejected every one
+     * — it is a spec field that never reached the code. The information is
+     * real: an app whose schema uses Postgres-only DDL cannot be installed
+     * against SQLite, and deleting the field to satisfy the validator would
+     * have thrown away the only place that is written down.
+     *
+     * Optional and additive, so nothing that validated before stops.
+     */
+    engines: z.array(z.enum(MANIFEST_ENGINES)).min(1).optional(),
+    requires: z.array(capabilitySchema).optional(),
+    /**
+     * The installed versions this release can update in place, as a semver
+     * range (`>=0.2.0`). An install outside it is not offered the update and
+     * is refused one: a release whose tables changed shape says so here, and
+     * the operator is told to uninstall first rather than left with an update
+     * that fails half-way. Absent means any older version.
+     */
+    updatesFrom: z
+      .string()
+      .min(1)
+      .max(120)
+      .refine((range) => parseSemverRange(range) !== null, {
+        message: 'a semver range such as ">=0.2.0", "^0.2.0" or ">=0.2.0 <1.0.0"',
+      })
+      .optional(),
+  })
+  .strict();
+
+// ── requiredSchema (create-or-map) ───────────────────────────────────────────
+
+/** Abstract column types the introspection engine emits. */
+export const COLUMN_TYPES = [
+  'id',
+  'text',
+  'int',
+  'bigint',
+  'decimal',
+  'money',
+  'float',
+  'bool',
+  'enum',
+  'json',
+  'date',
+  'timestamptz',
+  'uuid',
+  'fk',
+  'blob',
+  // A time of day with no date and no zone (`time` on Postgres and MySQL, kept as text by SQLite).
+  'time',
+] as const;
+
+/** Optional semantic pre-seed so widgets auto-instantiate. */
+export const COLUMN_SEMANTICS = [
+  'name',
+  'money',
+  'image',
+  'email',
+  'avatar',
+  'geo-lat',
+  'geo-lng',
+] as const;
+
+/**
+ * The kinds of file a file column may take (`rules.file.accept`), by the
+ * names the server's content check gives them: what a file's bytes are, never
+ * what its name or its sender says. A HEIC picture is never taken by a column:
+ * its camera notes (the place, the device) cannot be taken out of it. An SVG
+ * is taken only as the server writes it again from its own tree, without
+ * anything that could run (`files/svg.ts`); a model (GLB, STL, 3MF) and a web
+ * font (WOFF2) only when their whole bytes are what they say (`files/models.ts`).
+ */
+export const FILE_COLUMN_KINDS = ['png', 'jpeg', 'webp', 'gif', 'pdf', 'office', 'zip', 'csv', 'text', 'markdown', 'json', 'mp4', 'webm', 'mp3', 'wav', 'ogg', 'tiff', 'svg', 'glb', 'stl', '3mf', 'woff2'] as const;
+
+/**
+ * The kinds of file a guest may upload into a file column (`rules.file.upload`),
+ * by the words a form's file question uses, each with the column kind
+ * (`accept`) it is: pictures, PDF, plain text, TIFF (a print shop's artwork,
+ * kept and handed back as a download, never drawn on a page) and SVG (a
+ * customer's logo, kept only as the server writes it again, and never served
+ * to anyone but staff and the guest who sent it). The column's `accept` names
+ * each kind its upload takes. Models and fonts are no guest's: customers send
+ * logos, photos and finished print files, and the shop makes its own assets.
+ */
+export const FILE_UPLOAD_KINDS = { jpg: 'jpeg', png: 'png', pdf: 'pdf', text: 'text', tiff: 'tiff', svg: 'svg' } as const satisfies Readonly<Record<string, (typeof FILE_COLUMN_KINDS)[number]>>;
+export type FileUploadKind = keyof typeof FILE_UPLOAD_KINDS;
+
+/**
+ * The kinds a file column's `accept` names that only a newer Adminium takes
+ * (`file.assetKinds` in `words.ts`): a cleaned SVG, a model, a web font.
+ */
+export const ASSET_FILE_KINDS = ['svg', 'glb', 'stl', '3mf', 'woff2'] as const satisfies readonly (typeof FILE_COLUMN_KINDS)[number][];
+
+/**
+ * The largest product asset served to every visitor (an entry's `assets`,
+ * through `GET /public/assets`), by its kind: a model 30 MiB, a font or an SVG
+ * piece 2 MiB. A column an entry shows as assets takes no larger file of that
+ * kind, so an asset staff could save is one visitors load.
+ */
+export const PUBLIC_ASSET_MAX_BYTES: Readonly<Record<(typeof ASSET_FILE_KINDS)[number], number>> = {
+  glb: 30 * 1024 * 1024,
+  stl: 30 * 1024 * 1024,
+  '3mf': 30 * 1024 * 1024,
+  woff2: 2 * 1024 * 1024,
+  svg: 2 * 1024 * 1024,
+};
+
+/** Whether a file rule takes product assets and nothing else. */
+export function takesAssetsOnly(accept: readonly string[]): boolean {
+  return accept.length > 0 && accept.every((kind) => (ASSET_FILE_KINDS as readonly string[]).includes(kind));
+}
+
+/**
+ * The kinds of file a PICTURE column takes: a text column with `semantic:
+ * "image"` and a file rule (`rules.file`) whose `accept` names only these.
+ * Never SVG, which can carry script.
+ */
+export const PICTURE_FILE_KINDS = ['png', 'jpeg', 'webp', 'gif'] as const satisfies readonly (typeof FILE_COLUMN_KINDS)[number][];
+
+/** Whether a file rule takes pictures and nothing else. */
+export function takesPicturesOnly(accept: readonly string[]): boolean {
+  return accept.length > 0 && accept.every((kind) => (PICTURE_FILE_KINDS as readonly string[]).includes(kind));
+}
+
+/**
+ * The most a file column's `maxBytes` may say: 100 MiB (a print shop's
+ * artwork PDF). The install's own ceiling (`files.maxBytes`) still holds every
+ * upload, and the owner may set it lower.
+ */
+export const FILE_COLUMN_MAX_BYTES = 100 * 1024 * 1024;
+
+/**
+ * The largest picture served to every visitor (an entry's `pictures`, through
+ * `GET /public/pictures`): 5 MiB. A picture column shown to visitors takes no
+ * larger file, so a picture staff could save is one visitors see.
+ */
+export const PUBLIC_PICTURE_MAX_BYTES = 5 * 1024 * 1024;
+
+/** The most files a json file column may hold. */
+export const FILE_COLUMN_MAX_COUNT = 20;
+
+/** Structural role markers. */
+export const COLUMN_ROLES = ['pk', 'created_at', 'updated_at'] as const;
+
+export { labelsSchema };
+
+/**
+ * The rules an app asks Adminium to keep on a column (written as column-rule
+ * overrides at install). The first five are the rules an operator can set in
+ * the column inspector; the rest are the ones Adminium DECIDES for a public
+ * write, so a browser never picks a price, a number or a code:
+ *
+ *  - `copy`: take the value from the linked row (`via` is this table's
+ *    foreign-key column, `from` a column of the row it points at).
+ *  - `sequence`: the next number in this column's own counter.
+ *  - `code`: a short random code (Crockford base 32), unique in the column.
+ *  - `rollup`: a total over child rows, kept in step as they change.
+ *  - `venueLocal`: a wall time with no zone is read in the venue's zone.
+ *  - `personal`: whether the column is personal data, overriding the guess
+ *    Adminium makes from its name.
+ *  - `secret`: whether the column is a secret no response ever carries,
+ *    overriding the same guess (a `…token…` name reads as one).
+ */
+/** A child list a fingerprint covers: its rows in `orderBy` order, then by key. */
+const hashChildSchema = z
+  .object({ table: refSchema, via: refSchema, columns: z.array(refSchema).min(1).max(24), orderBy: refSchema.optional() })
+  .strict();
+
+/** A number the manifest states, or a whole-number setting. */
+const stampAmount = (max: number) => z.union([z.number().int().min(0).max(max), settingRefSchema]);
+
+/** `addMinutes`: now plus minutes or hours — one of the two — capped by a moment. */
+const addMinutesSchema = z
+  .object({ minutes: stampAmount(MOMENT_LIMITS.minutes).optional(), hours: stampAmount(MOMENT_LIMITS.hours).optional(), notAfter: momentSchema.optional() })
+  .strict()
+  .refine((a) => (a.minutes === undefined) !== (a.hours === undefined), { message: 'a stamp adds minutes or hours, one of the two' });
+
+/** `deadline`: so many days after today at a time of day, capped by a moment. */
+const deadlineSchema = z
+  .object({ days: stampAmount(MOMENT_LIMITS.days), time: clockTimeSchema, notAfter: momentSchema.optional() })
+  .strict();
+
+/** The days of the week, as a working week names them. */
+export const WORKING_WEEKDAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] as const;
+
+/** A time of day on a 24-hour clock, `HH:MM`. */
+const cutoffTimeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'a time of day, HH:MM on a 24-hour clock');
+
+/**
+ * `addWorkingDays`: the `days`-th working day after the day an order is
+ * RECEIVED — the day of `from` (`now`, or a date or moment of the row) on
+ * the venue's clock when that is a working day and `from` is before the
+ * cut-off (or has no time, or there is no cut-off); otherwise the next
+ * working day. A working day is one of `weekdays` that no active row of
+ * `closures` covers. `weekdays` and `cutoff` are stated, or name a `string`
+ * setting of the app (a shop changes its week and its cut-off itself).
+ */
+const addWorkingDaysSchema = z
+  .object({
+    from: z.union([z.literal('now'), refSchema]),
+    days: z.union([refSchema, z.number().int().min(0).max(3650)]),
+    map: z.record(z.string().min(1), z.number().int().min(0).max(3650)).optional(),
+    weekdays: z.union([refSchema, z.array(z.enum(WORKING_WEEKDAYS)).min(1).max(7)]),
+    cutoff: z.union([cutoffTimeSchema, refSchema]).optional(),
+    closures: z.object({ table: refSchema, from: refSchema, to: refSchema, active: refSchema.optional() }).strict().optional(),
+  })
+  .strict();
+
+/**
+ * What a stamp writes:
+ *
+ *  - `now` (a timestamptz), `today` (a date, on the venue's calendar),
+ *    `user-name`, `user-id`;
+ *  - `byOrigin`: one value for a public write, another for staff — or, with no
+ *    `staff`, whatever the staff writer chose (a desk records how a client
+ *    approved; the portal always says "portal");
+ *  - `copy`: another column of the same row as it stands at that moment (a
+ *    client's first answer, kept when they edit it later);
+ *  - `claim`: a column of the signed-in person's own row (their email, their
+ *    name) on a public write; on a staff write, `staff` says what instead;
+ *  - `addDays`: a date so many days after another (`due_on` = `issued_on` +
+ *    the terms' days, `map` giving each term its days);
+ *  - `addWorkingDays`: a date so many WORKING days after a moment on the
+ *    venue's clock (`ready_by` = the order's time + 3 working days): the
+ *    working week and the daily cut-off stated, or named as the app's own
+ *    settings; the days a closures table holds skipped;
+ *  - `hashOf`: a fingerprint — SHA-256 over the named columns, child rows and
+ *    a linked row's text, in a canonical form anyone can recompute;
+ *  - `addMinutes`: the moment so many minutes or hours from now (a hold for
+ *    ten minutes), the number stated or read from the settings row — but
+ *    never later than `notAfter`, as a deadline is capped (an offer ends at
+ *    the doors at the latest);
+ *  - `deadline`: `days` after today on the venue's calendar at `time`, but
+ *    never later than `notAfter`, a moment of the row or a linked row (a
+ *    transfer due in five days at 18:00, or three days before the show);
+ *  - `moment`: a moment of the row or a linked row (see `refs.ts`), written
+ *    again whenever the stamp fires — with `on: {columns}`, whenever what it
+ *    is worked out from changes (a stay's cancel-by, from its arrival); a
+ *    moment that cannot be found writes nothing (empty).
+ */
+export const stampSetSchema = z.union([
+  z.enum(['now', 'today', 'user-name', 'user-id']),
+  z.object({ byOrigin: z.object({ public: z.string().min(1), staff: z.string().min(1).optional() }).strict() }).strict(),
+  z.object({ claim: refSchema, staff: z.enum(['user-name', 'user-id']).optional() }).strict(),
+  z.object({ copy: refSchema }).strict(),
+  z
+    .object({
+      addDays: z
+        .object({
+          date: refSchema,
+          days: z.union([refSchema, z.number().int().min(0).max(3650)]),
+          map: z.record(z.string().min(1), z.number().int().min(0).max(3650)).optional(),
+        })
+        .strict(),
+    })
+    .strict(),
+  z
+    .object({
+      hashOf: z
+        .object({
+          columns: z.array(refSchema).min(1).max(24),
+          children: z.array(hashChildSchema).max(4).optional(),
+          linked: z
+            .array(
+              z
+                .object({
+                  via: refSchema,
+                  table: refSchema,
+                  columns: z.array(refSchema).min(1).max(24),
+                  children: z.array(hashChildSchema).max(4).optional(),
+                })
+                .strict(),
+            )
+            .max(4)
+            .optional(),
+        })
+        .strict(),
+    })
+    .strict(),
+  z.object({ addMinutes: addMinutesSchema }).strict(),
+  z.object({ deadline: deadlineSchema }).strict(),
+  z.object({ moment: momentSchema }).strict(),
+  z.object({ addWorkingDays: addWorkingDaysSchema }).strict(),
+]);
+
+/**
+ * When a stamp is written: on create, when a column changes to a value, when
+ * a column is first filled, or whenever one of `columns` changes (a create
+ * sets them all).
+ */
+export const stampTriggerSchema = z.union([
+  z.literal('create'),
+  z.object({ column: refSchema, values: z.array(scalarSchema).min(1).max(16) }).strict(),
+  z.object({ column: refSchema, filled: z.literal(true) }).strict(),
+  z.object({ columns: z.array(refSchema).min(1).max(8) }).strict(),
+]);
+
+/** What renews a code: a change of a column, or a column moving to one of `values`. */
+export const codeRenewTriggerSchema = z.union([
+  z.object({ column: refSchema, changed: z.literal(true) }).strict(),
+  z.object({ column: refSchema, values: z.array(scalarSchema).min(1).max(16) }).strict(),
+]);
+
+/**
+ * A price worked out night by night (`rules.perNight`): for each night from
+ * `from` up to the day before `to`, the base rate read from the row `rate.via`
+ * points at, plus every adjustment row that matches that night (a weekend, a
+ * season). Each night is rounded, and the column holds their sum.
+ */
+export const perNightSchema = z
+  .object({
+    /** Date columns of this row: the first night, and the day after the last. */
+    from: refSchema,
+    to: refSchema,
+    /** A foreign key of this row, and the number column of the row it points at. */
+    rate: z.object({ via: refSchema, column: refSchema }).strict(),
+    /**
+     * A part of another row's price by the night (a credit for the nights a
+     * stay did not use): `via` a foreign key of this row, `column` that row's
+     * price by the night. The nights are priced as that row's are; when its
+     * stored price no longer matches today's rates (they changed since it was
+     * priced), the part is scaled to what it was charged, and never more.
+     */
+    of: z.object({ via: refSchema, column: refSchema }).strict().optional(),
+    adjust: z
+      .object({
+        /** The table of adjustments. */
+        table: refSchema,
+        match: z
+          .object({
+            /** A foreign key of the adjustments to what `rate.via` points at; empty = every one. */
+            via: refSchema.optional(),
+            /** A text column listing the nights it applies on (`fri,sat`); empty = every night. */
+            weekdays: refSchema.optional(),
+            /** Date columns: the first and the last night it applies on, both included; empty = open. */
+            from: refSchema.optional(),
+            to: refSchema.optional(),
+          })
+          .strict(),
+        /** The number added to a night (negative for a discount). */
+        add: refSchema,
+        /** The text a night's line is tagged with. */
+        name: refSchema,
+        /** Only the adjustment rows whose column equals the value (`active = true`). */
+        where: z.object({ column: refSchema, eq: scalarSchema }).strict().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+/**
+ * A value kept on one side of another column's: a column of the same row, or
+ * — with `via`, a foreign key of this row — a column of the row it points at.
+ * A date against a date, a number against a number (warm below stale), a
+ * time of day kept as text (`HH:MM`) against another (opening before
+ * closing). `when`: held only while the row, as the write leaves it, meets
+ * these (a credit bounded by its stay's departure only once it is for nights
+ * not stayed). `strict`: the two may not be the same — always, or only while
+ * the row meets these (a guest who left early is credited from the day after
+ * the arrival; a guest who never came, from the arrival itself). `days`, on a
+ * date: the other date moved by so many days (a cover ends at most a year
+ * after it starts: `notAfter: {column: 'starts_on', days: 365}`).
+ */
+const dateBoundSchema = z
+  .object({
+    column: refSchema,
+    via: refSchema.optional(),
+    when: z.array(stateConditionSchema).min(1).max(8).optional(),
+    strict: z.union([z.literal(true), z.array(stateConditionSchema).min(1).max(8)]).optional(),
+    days: z.number().int().min(1).max(36_600).optional(),
+  })
+  .strict();
+
+/** What a bound compares a column as, by its type: null for a column no bound holds. */
+function boundKindOf(type: string | undefined): 'date' | 'number' | 'time' | null {
+  if (type === 'date' || type === 'timestamptz') return 'date';
+  if (type === 'int' || type === 'bigint' || type === 'decimal' || type === 'money' || type === 'float') return 'number';
+  if (type === 'text') return 'time';
+  return null;
+}
+
+const BOUND_KIND_WORDS = { date: 'a date', number: 'a number', time: 'a time of day kept as text' } as const;
+
+/** A table of an add-on, by the add-on's key and the table's own short name. */
+export const addOnTableSchema = z
+  .object({
+    addOn: z.string().regex(/^[a-z][a-z0-9-]{1,79}$/, 'an add-on key'),
+    table: refSchema,
+  })
+  .strict();
+export type AddOnTable = z.infer<typeof addOnTableSchema>;
+
+export const columnRulesSchema = z
+  .object({
+    options: z
+      .union([
+        z.object({ list: z.string().min(1).max(120) }).strict(),
+        z
+          .object({
+            values: z
+              .array(
+                z
+                  .object({ value: z.string().min(1).max(256), label: textOrLabels.optional(), tone: z.string().max(32).optional() })
+                  .strict(),
+              )
+              .min(1)
+              .max(500),
+          })
+          .strict(),
+      ])
+      .optional(),
+    enumLabels: z
+      .object({
+        labels: z.record(z.string().min(1), textOrLabels),
+        tones: z.record(z.string().min(1), z.string().max(32)).optional(),
+      })
+      .strict()
+      .optional(),
+    required: z.literal(true).optional(),
+    /**
+     * Required only while another column of the same row holds one of `in`
+     * (`person_id` when `kind` is `away`). The row as the write leaves it is
+     * judged: a change of either column that leaves this one empty is refused.
+     */
+    requiredWhen: z
+      .object({ column: refSchema, in: z.array(scalarSchema).min(1).max(32) })
+      .strict()
+      .optional(),
+    validation: z
+      .object({
+        format: z.enum(['email', 'url', 'phone']).optional(),
+        min: z.number().optional(),
+        max: z.number().optional(),
+        minLength: z.number().int().nonnegative().optional(),
+        maxLength: z.number().int().positive().optional(),
+      })
+      .strict()
+      .optional(),
+    /**
+     * A value copied from the row `via` points at. `follow`: kept in step
+     * when that row's column changes later (an extra's nights follow its stay's).
+     */
+    copy: z
+      .object({ via: refSchema, from: refSchema, mode: z.enum(['default', 'always']).optional(), follow: z.literal(true).optional() })
+      .strict()
+      .optional(),
+    /**
+     * A value filled on create when the writer gives none (and a `copy` on the
+     * same column came back empty): the connection's currency, a column of the
+     * app's settings row, or a setting of an add-on the app requires.
+     */
+    default: z
+      .object({ from: z.union([z.literal('connection.currency'), settingSourceSchema]) })
+      .strict()
+      .optional(),
+    /**
+     * A running number. `gapless` numbers are taken inside the write that
+     * creates the row, so the series never skips or repeats (an invoice's);
+     * `scope` numbers per parent row (a deliverable's versions v1, v2 …);
+     * `startSetting` reads the first number from a setting. `sample` lets the
+     * app's sample rows take numbers in the series (a job's J-01): the next
+     * real row follows them. Never a tax document's series, which no sample
+     * row may leave a hole in.
+     */
+    sequence: z
+      .object({
+        start: z.number().int().min(1).optional(),
+        gapless: z.literal(true).optional(),
+        sample: z.literal(true).optional(),
+        startSetting: settingSourceSchema.optional(),
+        scope: refSchema.optional(),
+      })
+      .strict()
+      .optional(),
+    /**
+     * A text column written from a running number of the same row: the
+     * prefix, then the digits padded (`INV-2042`). The prefix may come from a
+     * setting, so a studio can change it; a change applies to the next number.
+     */
+    format: z
+      .object({
+        from: refSchema,
+        prefix: z.string().regex(/^[A-Za-z0-9_/.-]{0,12}$/, 'a prefix of up to 12 letters, digits and - _ / .').optional(),
+        prefixSetting: settingSourceSchema.optional(),
+        pad: z.number().int().min(0).max(12).optional(),
+      })
+      .strict()
+      .optional(),
+    code: z
+      .object({
+        prefix: z.string().regex(/^[A-Z][A-Z0-9]{0,5}-?$/, 'an upper-case prefix, e.g. MR-').optional(),
+        length: z.number().int().min(4).max(16),
+        /**
+         * A new code in the same write when a column changes (a ticket sent
+         * to another address), or moves to one of `values` (a transfer
+         * accepted): the old code stops working as the write commits.
+         */
+        renew: z.object({ on: z.union([codeRenewTriggerSchema, z.array(codeRenewTriggerSchema).min(2).max(3)]) }).strict().optional(),
+        /**
+         * A code no desk hands out (an online order's own link): left out of
+         * every staff read — rows, exports, live frames, the audit — for
+         * every role, Super Admin too. The link it opens and the emails
+         * that carry it to the row's holder still use it.
+         */
+        hiddenFromStaff: z.literal(true).optional(),
+        /**
+         * On a table of an add-on: a row its ledger's own answer adds may
+         * bring this code with it (a gift card brought in from an older
+         * system under the code its holder has always had). Adminium keeps a
+         * code given so, held to the code alphabet, 4 to 16 characters after
+         * the prefix, and the column's `unique`; with none given it makes one
+         * as ever. No door a person saves through gains anything by it, and a
+         * change never writes a code.
+         */
+        givenByLedger: z.literal(true).optional(),
+      })
+      .strict()
+      .optional(),
+    /** A value Adminium works out from the row's other columns (see `formula.ts`). */
+    formula: formulaExprSchema.optional(),
+    /** A price worked out night by night (see `perNightSchema`). */
+    perNight: perNightSchema.optional(),
+    /**
+     * How a text value is stored whoever writes it: `trim` without spaces at
+     * either end, `email` trimmed and in lower case — so a unique address and
+     * a person signing in with it agree on every database.
+     */
+    normalize: z.enum(['trim', 'email', 'code']).optional(),
+    /**
+     * A foreign key filled from a code a person types into `from`: the one
+     * row of `table` whose `column` holds it, compared as a code (upper
+     * case, spaces and dashes left out), among the rows `where` allows and,
+     * with `scope`, the ones for the same parent as this row.
+     */
+    lookup: z
+      .object({
+        from: refSchema,
+        /** One of the manifest's own tables, or a table of an add-on it names (the column then carries the same `addOnLink`). */
+        table: z.union([refSchema, addOnTableSchema]),
+        column: refSchema,
+        where: codeWhereSchema.optional(),
+        scope: z
+          .array(z.object({ column: refSchema, equals: refSchema, orEmpty: z.literal(true).optional() }).strict())
+          .min(1)
+          .max(2)
+          .optional(),
+      })
+      .strict()
+      .optional(),
+    /**
+     * A foreign key filled with the band a number of this row falls in: of
+     * the rows of `table` (within `scope`) whose `min` is at most `value`,
+     * the one with the greatest `min` — a quantity's price break, an order's
+     * delivery band by its weight. None: the link is empty (a product with
+     * no breaks). Past the picked row's `max` (when it has one), `over`
+     * says what happens: `refuse` the write (the default), or leave the
+     * link `empty` (a parcel too heavy for any band, quoted by hand). Only
+     * Adminium writes the link. A `value` that is a total of child rows, or
+     * a formula, is picked again whenever the total settles.
+     */
+    band: z
+      .object({
+        table: refSchema,
+        min: refSchema,
+        max: refSchema.optional(),
+        value: refSchema,
+        scope: z.array(z.object({ column: refSchema, equals: refSchema }).strict()).min(1).max(2).optional(),
+        over: z.enum(['refuse', 'empty']).optional(),
+      })
+      .strict()
+      .optional(),
+    rollup: z
+      .object({
+        /** The child table, its foreign key back to this row, and what to add up. */
+        from: refSchema,
+        via: refSchema,
+        /** The child column to add up; or, instead, `count` the child rows. */
+        sum: refSchema.optional(),
+        count: z.literal(true).optional(),
+        /**
+         * Or, instead of a total, the newest child row's value: the column
+         * `of` of the row whose `by` (a date, a time or a number) is the
+         * greatest — a deal's amount is its last sent quote's total. A row
+         * whose `by` is empty is left out; of two rows with the same `by`,
+         * the one with the greater key. Empty while no row qualifies. With
+         * `row`, a plain column of this table (not a link) holds that row's key.
+         */
+        latest: z.object({ of: refSchema, by: refSchema, row: refSchema.optional() }).strict().optional(),
+        /** Multiplied into `sum` per child row, e.g. `qty`. */
+        times: refSchema.optional(),
+        /** A child row whose column holds a value is left out — a voided line (`voided_at`). */
+        unlessSet: refSchema.optional(),
+        /** Only child rows whose column equals the value are added up (`voided = false`). */
+        where: z.object({ column: refSchema, eq: scalarSchema }).strict().optional(),
+        /**
+         * A second column of this row kept in step: `of − Σminus − total`
+         * (`balance = fee − waived − paid`). Adminium writes it; nobody else may.
+         */
+        balance: z
+          .object({ column: refSchema, of: refSchema, minus: z.array(refSchema).max(4).optional() })
+          .strict()
+          .optional(),
+        /** A child write that would take the balance below zero is refused. */
+        cap: z.literal(true).optional(),
+        /** With `cap`: the cap is not judged for a row whose yes/no `column` is true (an item that may be sold below zero). */
+        capUnless: z.object({ column: refSchema }).strict().optional(),
+      })
+      .strict()
+      .optional(),
+    /**
+     * A value Adminium writes when something happens: the moment, or who did
+     * it, on a create or when another column changes to one of `values`
+     * (`checked_in_at` when `status` becomes `checked_in`). `byOrigin` writes
+     * one value for a public write and another for staff. A public write never
+     * stamps a person: a browser key is nobody.
+     */
+    stamp: z
+      .object({
+        set: stampSetSchema,
+        on: z.union([stampTriggerSchema, z.array(stampTriggerSchema).min(2).max(3)]),
+        /**
+         * Emptied again when a move marked `undo` takes the row back out of a
+         * state the stamp watches (the time an order was marked ready, when
+         * the kitchen undoes the Ready).
+         */
+        clearOnBack: z.literal(true).optional(),
+        /**
+         * Always the server's: a value any writer sends for the column — a
+         * form, a bulk edit, a rule, the public door, an add-on — is dropped,
+         * and a line of a brought file that carries one is refused, so who
+         * ticked a consent and when is never typed (`may_email_by_id`). Only
+         * history keeps its own: an app's sample data and an undo.
+         */
+        strict: z.literal(true).optional(),
+        /**
+         * Never earlier than the date the column holds: when the stamp fires,
+         * the column takes the later of the two (a ready-by told to the
+         * customer never moves forward). An empty column takes the new value.
+         * A date or a timestamptz column only.
+         */
+        notEarlier: z.literal(true).optional(),
+      })
+      .strict()
+      .optional(),
+    venueLocal: z.literal(true).optional(),
+    /**
+     * Whether the column holds personal data, when the app knows better than
+     * a guess from its name: a venue's own `phone` and `address` are a
+     * business's, and its guest page may show them. The operator can still
+     * mark it otherwise.
+     */
+    personal: z.boolean().optional(),
+    /**
+     * Whether the column is a secret no response ever carries, when the app
+     * knows better than a guess from its name: a `share_token` whose `code`
+     * is the link a studio sends is shown to the staff who read the table.
+     * A `code` column is not taken for a secret by its name alone; `true`
+     * makes it one, as it makes any other column one.
+     */
+    secret: z.boolean().optional(),
+    /**
+     * A date that may never be later than today, on the venue's calendar — a
+     * payment is recorded when it came in, not when it might — or than another
+     * column's value, as `notBefore` says it (a credit's nights end by the
+     * stay's departure; a cover ends at most a year after it starts).
+     */
+    notAfter: z.union([z.literal('today'), dateBoundSchema]).optional(),
+    /**
+     * A value that may never be earlier than another column's: a column of
+     * the same row, or — with `via`, a foreign key of this row — a column of
+     * the row it points at (a payment is never dated before its invoice was
+     * issued; warm below stale; work starts before it ends). `now`, on a
+     * moment: a new row's moment is not in the past (a visit is never booked
+     * to start before now). Judged on a create only, and not on one that
+     * brings history (an import, sample data): a later change may correct it.
+     */
+    notBefore: z.union([z.literal('now'), dateBoundSchema]).optional(),
+    /**
+     * The column a staff create keeps its retry key in, as a hash: a desk's
+     * save sent again after a lost reply answers the row the first one made
+     * (`clientKey`), on a table no public entry creates rows of.
+     */
+    retryKey: z.literal(true).optional(),
+    /**
+     * A link into a table of an add-on the manifest names: the key of a row
+     * there. No foreign key is made, so the manifest installs whether or not
+     * the add-on is there; the link is read only while the add-on is
+     * installed, connected to this app and switched on.
+     */
+    addOnLink: addOnTableSchema.optional(),
+    /**
+     * A text column that holds a table's stored name (`<maker>:<table>`, or
+     * the table's own name when no app made it). Adminium rewrites it when
+     * the table is renamed.
+     */
+    tableRef: z.literal(true).optional(),
+    /**
+     * A text column that holds a staff member: the id of a person who signs
+     * in to Adminium, or nothing. The only kind of column a table's `belongs`
+     * reads a person from, so a role's rows can be "the ones this person
+     * owns". A sample row names a sample person, never an id.
+     */
+    staff: z.literal(true).optional(),
+    /**
+     * A text column in which people are mentioned: `@[Dana Whitlock](user:<id>)`
+     * names a staff member, who is told that they were mentioned, by whom and
+     * on which record — never the text. A save that names somebody who is not
+     * a person here is refused, and the text is kept. `about` is a link column
+     * of the same table: the notice then names the row it links to (a comment
+     * on a deal says the deal).
+     */
+    mentions: z.union([z.literal(true), z.object({ about: refSchema }).strict()]).optional(),
+    /**
+     * A json column that holds a position on the map: `{ lat, lng, by }`,
+     * where `by` says how it is known. `"town"` is the middle of a town from
+     * Adminium's own list of places (`placeId`), filled in by the server, so
+     * it is never more than "somewhere in this town"; `"exact"` is a point a
+     * person gave (typed, pasted, or dropped on the map). Every write is read
+     * and checked; a value that is not a position is refused.
+     */
+    place: z.literal(true).optional(),
+    /**
+     * A json column that holds an area on the map: a GeoJSON `Polygon` or
+     * `MultiPolygon`, with closed rings, at most 2,000 points and 64 KB.
+     */
+    area: z.literal(true).optional(),
+    /**
+     * A formula column over a total of its own row whose change is told
+     * after the save commits (a stock level going low), so a rule or a
+     * screen may act on it. Up to four on a table.
+     */
+    announce: z.literal(true).optional(),
+    /**
+     * Text a person types that may hold no link and no address, on every
+     * write whoever makes it: `true` for a name (no digits, 80 characters),
+     * or how many digits and characters a note may hold.
+     */
+    plainText: z.union([z.literal(true), z.object({ digits: z.number().int().min(0).max(20).optional(), max: z.number().int().min(1).max(1000).optional() }).strict()]).optional(),
+    /**
+     * A keyed hash of the address in `of`, written by Adminium: what a
+     * customer is told apart by where the address itself must not travel.
+     */
+    customerKey: z.object({ of: refSchema }).strict().optional(),
+    /** The last four characters of the code in `of`, written by Adminium: what a list shows of a code it never shows. */
+    codeLast4: z.object({ of: refSchema }).strict().optional(),
+    /**
+     * A foreign key that may name only a row meeting these conditions (a
+     * price-list line still offered): judged when a new row names one and
+     * when a change moves the link, whoever writes. A row already naming one
+     * that later stops meeting them keeps it while its other columns change.
+     * `same`: a column of the named row holds what this row holds in `as`, a
+     * column of its own or one of the row a link of it names (a visit's
+     * contact works for the company of the visit's deal); judged also when a
+     * change moves what `as` reads.
+     */
+    linkable: z
+      .object({
+        where: z.array(stateConditionSchema).min(1).max(8).optional(),
+        same: z
+          .array(z.object({ column: refSchema, as: z.string().regex(/^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)?$/, 'a column, or <link column>.<column>') }).strict())
+          .min(1)
+          .max(4)
+          .optional(),
+      })
+      .strict()
+      .refine((rule) => rule.where !== undefined || rule.same !== undefined, { message: 'a link says which rows it may name: "where", "same", or both' })
+      .optional(),
+    /**
+     * A column that holds files a signed-in person uploaded for it: a text
+     * column one, a json column a list of up to `maxCount`. What it holds is
+     * Adminium's own file id (`file_…`), never a link. Only the kinds in
+     * `accept`, judged by the file's bytes, each at most `maxBytes`; a picture
+     * loses what a camera writes beside it (the place, the device) as it is
+     * uploaded. A write may name only a file its writer uploaded and no record
+     * holds yet; a file a record holds is changed only through the record.
+     *
+     * A PICTURE column is a text column with `semantic: "image"` and this
+     * rule, its `accept` only pictures (`png`, `jpeg`, `webp`, `gif`): a
+     * sample row may give it one of the bundle's pictures (`{"@asset": …}`),
+     * and a public entry may show it to visitors (`pictures`). A column with
+     * `semantic: "image"` and no rule holds links, as it always has.
+     */
+    file: z
+      .object({
+        accept: z.array(z.enum(FILE_COLUMN_KINDS)).min(1).max(FILE_COLUMN_KINDS.length),
+        maxBytes: z.number().int().min(1024).max(FILE_COLUMN_MAX_BYTES),
+        maxCount: z.number().int().min(1).max(FILE_COLUMN_MAX_COUNT).optional(),
+        /**
+         * What a GUEST may upload into the column, through a public entry that
+         * lists it in `uploads`: the kinds (pictures, PDF, plain text, TIFF, SVG;
+         * each one the column's `accept` names), the most bytes of one (at most
+         * the column's `maxBytes`) and, in a list, how many (at most the
+         * column's `maxCount`). The file is kept unattached for a day; the
+         * guest's next write through the entry names it, and it becomes the
+         * row's file as a staff upload is.
+         */
+        upload: z
+          .object({
+            kinds: z.array(z.enum(Object.keys(FILE_UPLOAD_KINDS) as [FileUploadKind, ...FileUploadKind[]])).min(1).max(Object.keys(FILE_UPLOAD_KINDS).length),
+            maxBytes: z.number().int().min(1024).max(FILE_COLUMN_MAX_BYTES),
+            maxCount: z.number().int().min(1).max(FILE_COLUMN_MAX_COUNT).optional(),
+          })
+          .strict()
+          .optional(),
+      })
+      .strict()
+      .optional(),
+    /**
+     * When, and by whom, the column may change (see `change-guards.ts`): to
+     * some values only from others, only while another column holds a value,
+     * only by the person a staff column names, never by the people others
+     * name. Judged by the server on every way a row is written but history.
+     */
+    changes: changeGuardsSchema.optional(),
+    /**
+     * `"audit"`: the column's earlier values are kept for the audit log only,
+     * which the install's owner reads. Record history, a rule's
+     * `{{was.<column>}}`, a removed row's history and live frames leave them
+     * out (a removed message's text). The value a row holds now is read as
+     * any other column is.
+     */
+    history: columnHistorySchema.optional(),
+  })
+  .strict();
+export type ColumnRules = z.infer<typeof columnRulesSchema>;
+
+/**
+ * A limit on how much of a pool rows may take — the booking guard. One rule
+ * or a list; slot, parent and night kinds (see `capacity.ts`).
+ */
+export { capacitySchema };
+
+/** The longest `maxLength` a text column may ask for (see `maxLength` below). */
+export const MAX_TEXT_LENGTH = 1000;
+
+/**
+ * Why a column's `default` cannot be created, or `null` when it can.
+ *
+ * The rules are the ones every one of the three databases can honour with the
+ * same meaning, so a manifest that validates installs the same everywhere:
+ *
+ *  - `now` only on a `timestamptz`, and a timestamp takes nothing else. A
+ *    literal timestamp default is a fixed moment, which is never what a
+ *    manifest author means.
+ *  - `text` needs `maxLength`: MySQL gives an unbounded TEXT column no literal
+ *    default, and a manifest must not install on two engines and fail on the
+ *    third.
+ *  - `json`, `blob`, `date`, keys and foreign keys take none.
+ *  - an enum's default is one of its values, a number is a number, a boolean a
+ *    boolean.
+ */
+export function defaultIssue(c: {
+  type: string;
+  role?: string | undefined;
+  enum?: readonly string[] | undefined;
+  maxLength?: number | undefined;
+  default?: string | number | boolean | undefined;
+}): string | null {
+  const value = c.default;
+  if (value === undefined) return null;
+  if (c.role === 'pk') return 'a primary key takes no default; an int key numbers itself';
+  switch (c.type) {
+    case 'timestamptz':
+      return value === 'now' ? null : 'a timestamptz default must be "now"';
+    case 'text':
+      if (typeof value !== 'string') return 'a text default must be a string';
+      if (c.maxLength === undefined) return 'a text default needs maxLength (MySQL gives TEXT no default)';
+      return value.length <= c.maxLength ? null : 'the default is longer than maxLength';
+    case 'enum':
+      return typeof value === 'string' && (c.enum ?? []).includes(value)
+        ? null
+        : 'an enum default must be one of its values';
+    case 'int':
+    case 'bigint':
+      return typeof value === 'number' && Number.isInteger(value) ? null : 'an integer default must be a whole number';
+    case 'decimal':
+    case 'money':
+    case 'float':
+      return typeof value === 'number' ? null : 'a numeric default must be a number';
+    case 'bool':
+      return typeof value === 'boolean' ? null : 'a bool default must be true or false';
+    default:
+      return `a ${c.type} column takes no default`;
+  }
+}
+
+/**
+ * A link column's own words: the name Adminium gives the link, `remove` (the
+ * database keeps the foreign key and Adminium does not show the link) or
+ * `constraint: false` (Adminium shows the link and no foreign key is made for
+ * it, as for a link a person added in Studio).
+ */
+export const columnRelationSchema = z
+  .object({
+    label: z.string().min(1).max(120).optional(),
+    remove: z.literal(true).optional(),
+    constraint: z.literal(false).optional(),
+  })
+  .strict()
+  .refine((r) => r.label !== undefined || r.remove !== undefined || r.constraint !== undefined, { message: 'a relation says label, remove or constraint' })
+  .refine((r) => r.remove === undefined || (r.label === undefined && r.constraint === undefined), {
+    message: 'a link Adminium does not show has no label, and its foreign key stays: remove alone',
+  });
+export type ColumnRelation = z.infer<typeof columnRelationSchema>;
+
+export const requiredColumnSchema = z
+  .object({
+    // snake_case; a self-made app's column may keep its own name (`columnRefIssues`).
+    ref: z.string().refine(isRef, 'column ref must be a snake_case identifier'),
+    type: z.enum(COLUMN_TYPES),
+    semantic: z.enum(COLUMN_SEMANTICS).optional(),
+    role: z.enum(COLUMN_ROLES).optional(),
+    nullable: z.boolean().optional(),
+    // enum values when `type: 'enum'`; fk target ref when `type: 'fk'`.
+    enum: z.array(z.string().min(1)).optional(),
+    references: z.string().optional(),
+    /**
+     * The value the DATABASE fills when an insert leaves the column out. A
+     * literal of the column's own type, or the string `now` on a
+     * `timestamptz` column. Without one, a NOT NULL column refuses every insert
+     * that omits it — which is every insert an operator makes from a form that
+     * does not show that column.
+     *
+     * Additive and optional: an older server refuses a manifest carrying it
+     * (every block is `.strict()`), so an app that uses it raises
+     * `minAdminiumVersion` to the release that reads it.
+     */
+    default: z.union([z.string(), z.number().finite(), z.boolean()]).optional(),
+    /**
+     * `text` only: a `varchar(n)` instead of unbounded `text`. Short text is
+     * what a form, a unique index and MySQL's key limit all want. At most 1000
+     * characters — MySQL counts four bytes per character against one 65,535-byte
+     * row, so a few long columns would refuse the table.
+     */
+    maxLength: z.number().int().min(1).max(MAX_TEXT_LENGTH).optional(),
+    /**
+     * `decimal` / `money` only: the places kept after the point, 0–4, or
+     * `"currency"` — the decimals of the row's own `currency` column (JPY 0,
+     * EUR 2, KWD 3), else the connection's currency, else 2. Without it a
+     * decimal keeps four places. Totals, rollups and formulas round to it.
+     */
+    scale: z.union([z.number().int().min(0).max(4), z.literal('currency')]).optional(),
+    /**
+     * No two rows may hold the same value (empty values excepted). A text
+     * column needs `maxLength`: MySQL indexes no unbounded text.
+     */
+    unique: z.literal(true).optional(),
+    /**
+     * A plain index on a foreign key a limit or a total counts by (a
+     * capacity's `via`, a rollup's `via`), so the count under the limit's
+     * lock reads the rows it needs and not the whole table.
+     */
+    index: z.literal(true).optional(),
+    /**
+     * `decimal` / `money` only: the digits kept in all, beside `scale`
+     * (`decimal(10,2)`). Without it a decimal is made with 19. At least as
+     * many as the places after the point (4 when `scale` says none).
+     */
+    precision: z.number().int().min(1).max(65).optional(),
+    /** Kept off forms and lists, or shown again (`false`): installed as the column's hidden mark, which the operator may change. */
+    hidden: z.boolean().optional(),
+    /** An `int` column that holds a yes or a no (a `smallint` flag): read, written and shown as one on every engine. */
+    yesNo: z.literal(true).optional(),
+    /** A link's own words (an `fk` column): what Adminium calls it, that Adminium does not show it, or that no foreign key keeps it. */
+    relation: columnRelationSchema.optional(),
+    /** Rules Adminium keeps on the column once installed (see `columnRulesSchema`). */
+    rules: columnRulesSchema.optional(),
+    /**
+     * What a person calls the column — a form's field, a list's heading — in
+     * every language the app speaks. Installed as the column's label, which
+     * the operator can rename like any other.
+     */
+    label: textOrLabels.optional(),
+  })
+  .strict()
+  .refine((c) => c.type !== 'enum' || (c.enum !== undefined && c.enum.length > 0), {
+    message: 'an enum column must list its enum values',
+    path: ['enum'],
+  })
+  .refine((c) => c.type !== 'fk' || c.references !== undefined, {
+    message: 'a fk column must name its references target',
+    path: ['references'],
+  })
+  .refine((c) => c.maxLength === undefined || c.type === 'text', {
+    message: 'maxLength applies to a text column only',
+    path: ['maxLength'],
+  })
+  .refine((c) => c.scale === undefined || c.type === 'decimal' || c.type === 'money', {
+    message: 'scale applies to a decimal or money column only',
+    path: ['scale'],
+  })
+  .refine((c) => c.precision === undefined || c.type === 'decimal' || c.type === 'money', {
+    message: 'precision applies to a decimal or money column only',
+    path: ['precision'],
+  })
+  .refine((c) => c.precision === undefined || c.precision >= (typeof c.scale === 'number' ? c.scale : 4), {
+    message: 'precision counts every digit, so it is at least the places after the point (4 when scale gives none)',
+    path: ['precision'],
+  })
+  .refine((c) => c.yesNo === undefined || c.type === 'int', {
+    message: 'yesNo marks an int column as a yes or a no (a bool column is one already)',
+    path: ['yesNo'],
+  })
+  .refine((c) => c.relation === undefined || c.type === 'fk', {
+    message: 'relation describes a link: an fk column only',
+    path: ['relation'],
+  })
+  .refine((c) => c.unique === undefined || (c.role !== 'pk' && !['json', 'blob'].includes(c.type) && (c.type !== 'text' || c.maxLength !== undefined)), {
+    message: 'unique needs a column that can be indexed: not the key, not json or blob, text with maxLength',
+    path: ['unique'],
+  })
+  .superRefine((c, ctx) => {
+    const issue = defaultIssue(c);
+    if (issue !== null) ctx.addIssue({ code: 'custom', message: issue, path: ['default'] });
+  });
+
+/** A table's declared plain indexes: up to six sets of 1 to 4 columns, in index order. */
+export const tableIndexesSchema = z.array(z.array(refSchema).min(1).max(4)).min(1).max(6);
+
+export const requiredTableSchema = z
+  .object({
+    ref: z.string().regex(/^[a-z][a-z0-9_]*$/, 'table ref must be a snake_case identifier'),
+    /**
+     * A self-made app's table under the name a person gave it by hand
+     * (`Order Lines`), beside its ref. Absent, the real name is the ref (or
+     * `<prefix><ref>`). See `table-names.ts`.
+     */
+    name: z.string().superRefine((name, ctx) => {
+      const issue = tableNameIssue(name);
+      if (issue !== null) ctx.addIssue({ code: 'custom', message: issue });
+    }).optional(),
+    /** A self-made app's table in a Postgres schema other than the connection's own (`sales`). */
+    schema: z.string().superRefine((schema, ctx) => {
+      const issue = tableSchemaIssue(schema);
+      if (issue !== null) ctx.addIssue({ code: 'custom', message: issue });
+    }).optional(),
+    columns: z.array(requiredColumnSchema).min(1),
+    /**
+     * A shape other apps may share, `<name>@<version>` (`menu@1`). Two apps
+     * that declare the same shape can use one table between them.
+     */
+    shape: z.string().regex(/^[a-z][a-z0-9-]*@\d+$/, 'a shape is <name>@<version>').optional(),
+    capacity: capacitySchema.optional(),
+    /** Booking people: no two counted rows of one resource may overlap (see `booking.ts`). */
+    booking: bookingSchema.optional(),
+    /** A row takes a resource for a time: no two overlap, and it lies within the resource's hours (see `occupies.ts`). */
+    occupies: occupiesSchema.optional(),
+    /** States, the moves between them, locks and no-delete (see `states.ts`). */
+    states: statesSchema.optional(),
+    /**
+     * A table built on a shape an add-on defines, `<addOn>/<name>@<version>`
+     * (`invoices/invoice@1`), and which part of it (`document`, `lines`).
+     * The table spells out the shape's columns and rules beside its own; the
+     * install checks them against the installed add-on. Not the same as
+     * `shape`, which lets apps SHARE one table: two apps built on one shape
+     * get a table each.
+     */
+    builtOn: z
+      .string()
+      .regex(/^[a-z][a-z0-9-]{1,79}\/[a-z][a-z0-9-]*@[1-9]\d*$/, 'builtOn is <add-on key>/<shape name>@<version>')
+      .optional(),
+    part: z.string().regex(/^[a-z][a-z0-9_]*$/, 'a part of the shape').optional(),
+    /** The part of the app the table belongs to (see `modules.ts`): a role of that part loses its grant here while the part is off. */
+    module: moduleIdSchema.optional(),
+    /**
+     * What a person calls ONE row ("Category") and the table ("Categories"),
+     * in every language the app speaks: a form's title and button, a page's
+     * empty state, a link's field. Installed as the table's label. Without
+     * them Adminium names the table from its real name (`pos_menu_categories`).
+     */
+    label: textOrLabels.optional(),
+    labelPlural: textOrLabels.optional(),
+    /** The column that names a row wherever another table links to it (a category's `name`). */
+    keyField: z.string().regex(/^[a-z][a-z0-9_]*$/, 'a column ref').optional(),
+    /**
+     * Sets of 2 to 4 columns no two rows may hold the same values in together
+     * (one waitlist entry per show per address). A row with any of them empty
+     * never collides.
+     */
+    unique: z.array(z.array(refSchema).min(2).max(4)).min(1).max(8).optional(),
+    /**
+     * Plain indexes beside the ones Adminium makes for keys, links and unique
+     * sets: up to six sets of 1 to 4 columns a list is filtered or sorted by.
+     */
+    indexes: tableIndexesSchema.optional(),
+    /** What a row of this table hands to an add-on's ledger, and when (see `ledgers.ts`). */
+    postings: postingsSchema.optional(),
+    /** Where an add-on's offers and codes lower this order's price (see `adjust.ts`). */
+    adjust: adjustSchema.optional(),
+    /** Whether an order line's design may be ordered, asked of an add-on (see `check.ts`). */
+    check: checkSchema.optional(),
+    /** How a person belongs to a row, so a role's rows can be limited to their own or their team's (see `roles.ts`). */
+    belongs: belongsSchema.optional(),
+    /** Rows read by the people they belong to and by nobody and nothing else: no rule, public entry, document or export. */
+    private: z.literal(true).optional(),
+    /** An add-on's table: the most an app's role may be given of it (see `app-grants.ts`). */
+    appGrants: appGrantsSchema.optional(),
+    /** What a removal of a row takes (a reason) and keeps (the removed row's history, read through a parent): see `removal.ts`. */
+    removal: removalSchema.optional(),
+    /** Left out of Adminium: no list, form or link shows it. Installed as the table's exclude mark. */
+    exclude: z.literal(true).optional(),
+    /**
+     * The source had "existing customers may get marketing mail" on for this
+     * people table. An install never switches it on: that is the word of
+     * somebody who sends campaigns here, with their own tick.
+     */
+    existingCustomers: z.literal(true).optional(),
+    /** The table's postings, and its price rule, kept switched off apart from the rules themselves. */
+    switchedOff: z
+      .object({ postings: z.array(z.string().regex(/^[a-z][a-z0-9-]*$/, 'a posting id')).min(1).max(6).optional(), adjust: z.literal(true).optional() })
+      .strict()
+      .refine((off) => off.postings !== undefined || off.adjust !== undefined, { message: 'a switch names postings, adjust, or both' })
+      .optional(),
+    /** The law makes the business keep its rows (`{law: 'tax'}`): an erasure leaves them, and says why (see `people.ts`). */
+    keep: keepSchema.optional(),
+    /** An add-on's own rows let go some days after a moment of theirs, unless a column holds a value (see `expire.ts`). */
+    expire: expireSchema.optional(),
+  })
+  .strict()
+  .refine(
+    (t) => new Set(t.columns.map((c) => c.ref)).size === t.columns.length,
+    { message: 'duplicate column ref in table', path: ['columns'] },
+  )
+  .refine((t) => t.keyField === undefined || t.columns.some((c) => c.ref === t.keyField), {
+    message: 'keyField must name one of the table’s columns',
+    path: ['keyField'],
+  })
+  .refine((t) => t.labelPlural === undefined || t.label !== undefined, {
+    message: 'labelPlural needs a label',
+    path: ['labelPlural'],
+  })
+  .refine((t) => t.capacity === undefined || t.booking === undefined, {
+    message: 'a table has a capacity or a booking rule, not both',
+    path: ['booking'],
+  })
+  .refine((t) => (t.builtOn === undefined) === (t.part === undefined), {
+    message: 'a table built on a shape names the part it is, and only such a table does',
+    path: ['part'],
+  })
+  .refine((t) => t.builtOn === undefined || t.shape === undefined, {
+    message: 'a table is built on an add-on\'s shape or shared under a shape, not both',
+    path: ['builtOn'],
+  })
+  .superRefine((t, ctx) => {
+    for (const issue of uniqueSetIssues(t)) ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    for (const issue of indexSetIssues(t)) ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    for (const issue of expireIssues(t)) ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+  });
+
+/**
+ * Everything wrong with a table's declared indexes: a column it lacks, a
+ * column named twice, a set given twice, a column no index can hold, and a
+ * set the database indexes already (a unique set, or one unique or key
+ * column).
+ */
+export function indexSetIssues(t: {
+  columns: readonly { ref: string; type: string; role?: string | undefined; unique?: true | undefined; maxLength?: number | undefined; rules?: ColumnRules | undefined }[];
+  unique?: readonly (readonly string[])[] | undefined;
+  indexes?: readonly (readonly string[])[] | undefined;
+}): { path: (string | number)[]; message: string }[] {
+  const out: { path: (string | number)[]; message: string }[] = [];
+  const keyOf = (set: readonly string[]): string => set.join('\u0000');
+  const uniques = new Set((t.unique ?? []).map((set) => keyOf([...set].sort())));
+  const seen = new Set<string>();
+  (t.indexes ?? []).forEach((set, k) => {
+    const path = ['indexes', k];
+    if (new Set(set).size !== set.length) out.push({ path, message: 'an index names each column once' });
+    // The order of an index's columns is part of it: (a, b) and (b, a) are two indexes.
+    if (seen.has(keyOf(set))) out.push({ path, message: 'the same columns are indexed twice' });
+    seen.add(keyOf(set));
+    if (uniques.has(keyOf([...set].sort()))) out.push({ path, message: 'indexed already: these columns are a unique set' });
+    for (const ref of set) {
+      const column = t.columns.find((c) => c.ref === ref);
+      if (column === undefined) {
+        out.push({ path, message: `no column "${ref}" to index` });
+        continue;
+      }
+      const indexable = column.type !== 'json' && column.type !== 'blob' && (column.type !== 'text' || column.maxLength !== undefined || column.rules?.code !== undefined);
+      if (!indexable) out.push({ path, message: `an index needs columns that can be indexed: not json or blob, text with maxLength ("${ref}")` });
+      if (set.length === 1 && (column.role === 'pk' || column.unique === true || column.rules?.code !== undefined)) {
+        out.push({ path, message: `indexed already: "${ref}" is unique` });
+      }
+    }
+  });
+  return out;
+}
+
+/**
+ * Everything wrong with a table's unique sets: a column it lacks, a column
+ * named twice, a set given twice, a column no index can hold, a set its own
+ * running number already keeps unique, and a set on a table built on an
+ * add-on's shape (the add-on's own writes could break it).
+ */
+function uniqueSetIssues(t: {
+  columns: readonly { ref: string; type: string; maxLength?: number | undefined; rules?: ColumnRules | undefined }[];
+  unique?: readonly (readonly string[])[] | undefined;
+  builtOn?: string | undefined;
+}): { path: (string | number)[]; message: string }[] {
+  const out: { path: (string | number)[]; message: string }[] = [];
+  const seen = new Set<string>();
+  (t.unique ?? []).forEach((set, k) => {
+    const path = ['unique', k];
+    if (t.builtOn !== undefined) out.push({ path, message: "a table built on an add-on's shape keeps the shape's rules, and adds no unique set" });
+    if (new Set(set).size !== set.length) out.push({ path, message: 'a unique set names each column once' });
+    const key = [...new Set(set)].sort().join('\u0000');
+    if (seen.has(key)) out.push({ path, message: 'the same columns are unique twice' });
+    seen.add(key);
+    for (const ref of set) {
+      const column = t.columns.find((c) => c.ref === ref);
+      if (column === undefined) {
+        out.push({ path, message: `no column "${ref}" to be unique with` });
+        continue;
+      }
+      const indexable = column.type !== 'json' && column.type !== 'blob' && (column.type !== 'text' || column.maxLength !== undefined || column.rules?.code !== undefined);
+      if (!indexable) out.push({ path, message: `unique needs columns that can be indexed: not json or blob, text with maxLength ("${ref}")` });
+    }
+    // A running number counted per parent is unique with its parent already.
+    const numbered = t.columns.some((c) => {
+      const sequence = c.rules?.sequence;
+      return sequence?.gapless === true && sequence.scope !== undefined && [sequence.scope, c.ref].sort().join('\u0000') === key;
+    });
+    if (numbered) out.push({ path, message: 'already unique by its number rule' });
+  });
+  return out;
+}
+
+export const requiredSchemaSchema = z
+  .object({
+    tables: z.array(requiredTableSchema).min(1),
+    /**
+     * Adminium names every table `<app key>_<ref>` (`pos_tickets`), and tells
+     * the app the real names at boot. Opt-in, because an app built before it
+     * hard-codes its table names. Apps only: an add-on uses its host's tables.
+     */
+    prefixed: z.literal(true).optional(),
+  })
+  .strict()
+  .refine((s) => new Set(s.tables.map((t) => t.ref)).size === s.tables.length, {
+    message: 'duplicate table ref in requiredSchema',
+    path: ['tables'],
+  });
+
+// ── shapes an add-on defines ──────────────────────────────────────────────────
+
+/**
+ * One part of a shape: its columns and the rules on them, and the table's
+ * states. A column's `references` names another part of the same shape
+ * (`document`), or a part of another of the add-on's shapes
+ * (`quote@1/document`).
+ */
+export const shapePartSchema = z
+  .object({
+    // An add-on's own columns are always snake_case: only a self-made app keeps a column's own name.
+    columns: z
+      .array(requiredColumnSchema)
+      .min(1)
+      .max(60)
+      .refine((columns) => columns.every((column) => SNAKE_REF.test(column.ref)), 'column ref must be a snake_case identifier'),
+    states: statesSchema.optional(),
+    indexes: tableIndexesSchema.optional(),
+    postings: postingsSchema.optional(),
+    adjust: adjustSchema.optional(),
+    /**
+     * What a row of this part is to a price rule that prices the same table
+     * (another shape's `adjust`, on the order these lines belong to): a line
+     * that names this column takes no reduction (`excludes`: a gift-card
+     * load), or is something sold that pays for itself later (`paidBy`: a
+     * voucher). The host's price rule says so on its line; a tool that adds
+     * the shape to an app's tables writes it there.
+     */
+    inAdjust: z.union([z.object({ excludes: refSchema }).strict(), z.object({ paidBy: refSchema }).strict()]).optional(),
+  })
+  .strict()
+  .refine((p) => new Set(p.columns.map((c) => c.ref)).size === p.columns.length, {
+    message: 'duplicate column ref in part',
+    path: ['columns'],
+  })
+  .superRefine((p, ctx) => {
+    if (p.inAdjust === undefined) return;
+    const [word, column] = Object.entries(p.inAdjust)[0] as [string, string];
+    if (!p.columns.some((c) => c.ref === column)) ctx.addIssue({ code: 'custom', message: `"${column}" is not a column of this part`, path: ['inAdjust', word] });
+  })
+  .superRefine((p, ctx) => {
+    for (const issue of indexSetIssues(p)) ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+  });
+
+/**
+ * A shape an add-on defines for apps to build their tables on (see
+ * `shapes.ts`): named parts, the document profiles made for an app's tables
+ * at install (in part and column names), and the messages it sends.
+ */
+export const shapeDefinitionSchema = z
+  .object({
+    name: z.string().regex(/^[a-z][a-z0-9-]*$/, 'a shape name is kebab-case'),
+    version: z.number().int().min(1).max(99),
+    parts: z.record(z.string().regex(/^[a-z][a-z0-9_]*$/, 'a part name is snake_case'), shapePartSchema),
+    documentProfiles: z
+      .array(appDocumentSchema.omit({ addOn: true, table: true, feature: true }).extend({ part: refSchema }).strict())
+      .max(8)
+      .optional(),
+    outbox: z
+      .object({
+        producers: z.array(outboxProducerSchema).min(1).max(16),
+        templates: z
+          .array(emailTemplateSchema.omit({ key: true, category: true, brand: true, attachments: true }).extend({ kind: z.string().min(1).max(40) }).strict())
+          .max(16)
+          .optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict()
+  .refine((d) => Object.keys(d.parts).length > 0, { message: 'a shape has at least one part', path: ['parts'] });
+export type ShapeDefinition = z.infer<typeof shapeDefinitionSchema>;
+
+/**
+ * Everything wrong inside an add-on's shapes: each part is checked as the
+ * app's tables are, with the parts of all its shapes as the tables (another
+ * shape's part as `<name>@<version>/<part>`), and its rules may read only the
+ * add-on's own settings.
+ */
+export function shapeDefinitionIssues(
+  addOn: string,
+  settings: readonly string[],
+  shapes: readonly ShapeDefinition[],
+): { path: (string | number)[]; message: string }[] {
+  const out: { path: (string | number)[]; message: string }[] = [];
+  const seen = new Set<string>();
+  shapes.forEach((shape, s) => {
+    const id = `${shape.name}@${String(shape.version)}`;
+    if (seen.has(id)) out.push({ path: ['addOn', 'shapes', s], message: `"${id}" is declared twice` });
+    seen.add(id);
+    const own = Object.entries(shape.parts).map(([ref, part]) => ({ ref, columns: part.columns, states: part.states }));
+    const others = shapes
+      .filter((other) => other !== shape)
+      .flatMap((other) => Object.entries(other.parts).map(([ref, part]) => ({ ref: `${other.name}@${String(other.version)}/${ref}`, columns: part.columns })));
+    const parts = own.map((p) => p.ref);
+    const issues = appReferenceIssues({ key: addOn, requiredSchema: { tables: [...own, ...others] } }, { addOn, settings });
+    for (const issue of issues) {
+      const [, , t, ...rest] = issue.path;
+      if (typeof t !== 'number' || t >= parts.length) continue;
+      out.push({ path: ['addOn', 'shapes', s, 'parts', parts[t]!, ...rest], message: issue.message });
+    }
+    const index = tableIndex([...own, ...others]);
+    (shape.documentProfiles ?? []).forEach((profile, d) => {
+      const at = (...rest: (string | number)[]) => ['addOn', 'shapes', s, 'documentProfiles', d, ...rest];
+      if (shape.parts[profile.part] === undefined) {
+        out.push({ path: at('part'), message: `"${id}" has no part "${profile.part}"` });
+        return;
+      }
+      out.push(...mappingIssues(profile.part, profile.mapping, index, at));
+    });
+    (shape.outbox?.producers ?? []).forEach((producer, p) => {
+      const source = 'onCreate' in producer ? producer.onCreate : 'onChange' in producer ? producer.onChange : 'onDelete' in producer ? producer.onDelete : producer.before;
+      if (shape.parts[source.table] === undefined) {
+        out.push({ path: ['addOn', 'shapes', s, 'outbox', 'producers', p], message: `"${id}" has no part "${source.table}"` });
+      }
+    });
+    const kinds = new Set((shape.outbox?.producers ?? []).map((producer) => producer.kind));
+    (shape.outbox?.templates ?? []).forEach((template, k) => {
+      if (!kinds.has(template.kind)) out.push({ path: ['addOn', 'shapes', s, 'outbox', 'templates', k, 'kind'], message: `no producer sends "${template.kind}"` });
+    });
+  });
+  return out;
+}
+
+// ── pages ────────────────────────────────────────────────────────────────────
+
+/** Where an entry of the app's section sits: its group, its icon, its place in the order. */
+export const railPlaceSchema = z
+  .object({
+    group: z.string().min(1).max(80),
+    icon: z.string().min(1).max(60),
+    order: z.number().int(),
+  })
+  .strict();
+
+export const pageNavSchema = railPlaceSchema
+  .extend({
+    /**
+     * The page is kept off the sidebar. It still exists: it opens by its
+     * address for whoever may view it, and search, the command palette and
+     * the assistant still find it for them. Somebody who may not view it
+     * finds it nowhere, as with any page.
+     */
+    offRail: z.literal(true).optional(),
+  })
+  .strict();
+
+export const pageSchema = z
+  .object({
+    ref: z.string().regex(/^[a-z][a-z0-9-]*$/, 'page ref must be a kebab-case identifier'),
+    template: z.string().min(1).max(80),
+    title: i18nMessageSchema,
+    nav: pageNavSchema,
+    // page-local table ref → requiredSchema table ref (resolved at install).
+    bindings: z.record(z.string(), z.string()).optional(),
+    config: z.record(z.string(), z.unknown()).optional(),
+    /**
+     * The page's title in other languages, keyed by BCP 47 tag (`de-DE`)
+     *. `title.fallback` stays the English; the sidebar shows the
+     * operator's language until the operator renames the page.
+     */
+    titles: z
+      .record(z.string().regex(/^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$/, 'titles are keyed by BCP 47 tag'), z.string().min(1).max(120))
+      .optional(),
+    /** The page shows only while this feature's add-ons are there (see `addOns.features`). */
+    feature: z.string().regex(/^[a-z][a-z0-9-]{0,39}$/, 'a feature id').optional(),
+    /** The part of the app the page belongs to: hidden and refused while it is off (see `modules.ts`). */
+    module: moduleIdSchema.optional(),
+    /** A self-made app's page as a person arranged it, in place of `config` (see `saved-apps.ts`). */
+    envelope: pageEnvelopeFieldSchema.optional(),
+    /** A self-made app's shared views of the page, each as stored (see `saved-apps.ts`). */
+    views: pageViewsSchema.optional(),
+  })
+  .strict();
+
+// ── roles ────────────────────────────────────────────────────────────────────
+
+export const roleSchema = z
+  .object({
+    key: z.string().regex(/^[a-z][a-z0-9-]*$/, 'role key must be a kebab-case identifier'),
+    name: z.string().min(1).max(80),
+    /** The name in other languages, keyed by BCP 47 tag; `name` stays the English. Shown until the owner renames the role. */
+    names: roleNamesSchema.optional(),
+    /** The parts of the app the role belongs to: offered while any of them is on (see `modules.ts`). */
+    modules: z.array(moduleIdSchema).min(1).max(16).optional(),
+    cloneFrom: z.string().optional(),
+    // grant strings validated against the RBAC grammar at install time.
+    permissions: z.array(z.string().min(1)).optional(),
+    /** Opens the app's own screens and never the dashboard (a till cashier). */
+    screensOnly: z.boolean().optional(),
+    /** Per table, what the role's update there may write (roles.ts). */
+    limits: roleLimitsSchema.optional(),
+    /** Grants on tables of add-ons the app names (roles.ts): live while that add-on is connected to the app. */
+    tables: roleAddOnTablesSchema.optional(),
+  })
+  .strict();
+
+// ── settings ─────────────────────────────────────────────────────────────────
+
+const settingBase = {
+  key: z.string().regex(/^[a-z][a-z0-9_]*$/, 'setting key must be snake_case'),
+  required: z.boolean().optional(),
+  secret: z.boolean().optional(),
+  label: i18nMessageSchema.optional(),
+  /*
+   * The sentence UNDER the field, where a label alone cannot carry the
+   * answer. Every variant below is `.strict()`, so a manifest that wrote
+   * `help` without this line was rejected rather than ignored — which is why
+   * it rides the same release as `RESERVED_KEYS` above rather than waiting
+   * for a settings form to need it.
+   */
+  help: i18nMessageSchema.optional(),
+};
+
+export const settingSchema = z.discriminatedUnion('type', [
+  z.object({ ...settingBase, type: z.literal('string'), default: z.string().optional() }).strict(),
+  z
+    .object({
+      ...settingBase,
+      type: z.literal('number'),
+      default: z.number().optional(),
+      min: z.number().optional(),
+      max: z.number().optional(),
+      unit: z.string().max(20).optional(),
+    })
+    .strict(),
+  z.object({ ...settingBase, type: z.literal('boolean'), default: z.boolean().optional() }).strict(),
+  z
+    .object({
+      ...settingBase,
+      type: z.literal('enum'),
+      enum: z.array(z.string().min(1)).min(1),
+      default: z.string().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      ...settingBase,
+      type: z.literal('file'),
+      accept: z.array(z.string().min(1)).optional(),
+    })
+    .strict(),
+  z.object({ ...settingBase, type: z.literal('json'), default: z.unknown().optional() }).strict(),
+]);
+
+// ── seeds ────────────────────────────────────────────────────────────────────
+
+export const seedSchema = z
+  .object({
+    table: z.string().min(1),
+    // inline rows, or a reference to a bundled seeds/<file> dataset.
+    rows: z.array(z.record(z.string(), z.unknown())).optional(),
+    file: z.string().min(1).optional(),
+  })
+  .strict()
+  .refine((s) => (s.rows === undefined) !== (s.file === undefined), {
+    message: 'a seed provides exactly one of `rows` or `file`',
+  });
+
+// ── widgets (optional custom bundles) ────────────────────────────────────────
+
+export const manifestWidgetSchema = z
+  .object({
+    id: z.string().min(1).max(80),
+    entry: z.string().min(1),
+  })
+  .strict();
+
+// ── frontend ─────────────────────────────────────────────────────────────────
+
+/** `expo` is a phone app's: built by Expo, never by the server's bundler, and only for the side `mobile`. */
+export const FRONTEND_KINDS = ['spa', 'electron', 'none', 'expo'] as const;
+
+export const frontendEnvVarSchema = z
+  .object({
+    required: z.boolean(),
+    example: z.string().optional(),
+  })
+  .strict();
+
+/**
+ * Which of the three sides a frontend is.
+ *
+ * The product rule this exists to make CHECKABLE: a micro-SaaS is the Adminium
+ * dashboard (mandatory, and never declared here — it comes from introspection)
+ * plus a staff side, a customer side, or both. At least one, or it is not a
+ * micro-SaaS but somebody's own build.
+ */
+export const FRONTEND_SIDES = ['staff', 'customer', 'mobile'] as const;
+
+/**
+ * The phone side: a phone app for customers, in `apps/<key>/mobile/`. It is a
+ * side of the app and not a web side: a server never serves it to the public,
+ * a package carries nothing of it, and it has no address, no placement and no
+ * switch. What it has is a key of its own kind for the public API.
+ */
+export const PHONE_SIDE = 'mobile';
+export const PHONE_KIND = 'expo';
+
+export const frontendSchema = z
+  .object({
+    /**
+     * REQUIRED, and the whole point of the array form. Without it the split
+     * lives only in prose and nothing can enforce it.
+     */
+    side: z.enum(FRONTEND_SIDES),
+    kind: z.enum(FRONTEND_KINDS),
+    entry: z.string().min(1).optional(),
+    env: z.record(z.string(), frontendEnvVarSchema).optional(),
+    /**
+     * The view names this side owns, e.g. `{ book, visits }`.
+     *
+     * RE-ADMITTED, not newly invented. Eleven shipped manifests already carry
+     * this key and the `.strict()` schema rejected every one of them — while
+     * being, per the fleet audit, "the only machine-readable record of the
+     * staff/customer split anywhere in the fleet". Deleting it during
+     * normalization was the tempting move and would have made the split
+     * permanently uncheckable.
+     */
+    routes: z.record(z.string(), z.string()).optional(),
+    /**
+     * Where a STAFF side opens by default: inside the dashboard, or on its own
+     * address (a till). The operator can change it; absent means inside.
+     */
+    placement: z.enum(['internal', 'external']).optional(),
+    /** Whether the side starts switched on. Absent means on. */
+    enabled: z.boolean().optional(),
+    /**
+     * The side reads its instance base and sends `X-Adminium-Install`, so a
+     * later install of the app (on another database) gets its screens too.
+     * Without it, only the first install's screens open.
+     */
+    instances: z.literal(true).optional(),
+    /**
+     * Where a record opens on this side, by table: `{ "deals": "/deals/{id}" }`.
+     * A notice about such a record, its e-mail's button and a search hit then
+     * open the app's own screen for somebody who may open this side, and the
+     * dashboard's record page for everybody else. The staff side's alone.
+     */
+    records: z
+      .record(z.string().regex(/^[a-z][a-z0-9_]*$/, 'a table ref'), z.string().max(200).refine(isRecordAddress, RECORD_ADDRESS_MESSAGE))
+      .refine((value) => Object.keys(value).length > 0, 'name at least one table')
+      .optional(),
+  })
+  .strict();
+
+// ── the app's sidebar, public access and sample data ─────────────────────────
+
+/** A heading in the app's own sidebar section; pages name it in `nav.group`. */
+/**
+ * A list of answers the app ships, for a column's `options: {list}`. Installed
+ * as the option list `<appKey>-<name>`, which the operator can then edit like
+ * any other; a list of that key they already made is left alone.
+ */
+export const optionListSchema = z
+  .object({
+    label: textOrLabels,
+    values: z
+      .array(
+        z
+          .object({
+            value: z.string().min(1).max(256),
+            label: textOrLabels.optional(),
+            tone: z.string().max(32).optional(),
+            /** A line under the answer where it is chosen. */
+            description: z.string().min(1).max(512).optional(),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(500),
+  })
+  .strict();
+
+export const navGroupSchema = z
+  .object({
+    key: z.string().regex(/^[a-z][a-z0-9-]*$/, 'a nav group key is kebab-case'),
+    label: labelsSchema,
+    order: z.number().int(),
+  })
+  .strict();
+
+/**
+ * An entry of the app's sidebar section that is not a page. It opens one of a
+ * closed list of places, never an address the manifest writes out: a screen of
+ * the dashboard narrowed to this app, or a screen of the app's own staff side.
+ */
+export const navLinkSchema = z
+  .object({
+    ref: z.string().regex(/^[a-z][a-z0-9-]*$/, 'a link ref is kebab-case').max(60),
+    label: labelsSchema,
+    nav: railPlaceSchema,
+    to: z.union([
+      /** A dashboard screen showing this app's own: its rules, its e-mails, its settings (parts, sample data). */
+      z.object({ screen: z.enum(NAV_LINK_SCREENS) }).strict(),
+      /** A screen of the app's staff side; no `path` is its first screen. */
+      z.object({ side: z.literal('staff'), path: z.string().max(200).refine(isSidePath, SIDE_PATH_MESSAGE).optional() }).strict(),
+    ]),
+    /** The part of the app the entry belongs to: it leaves the sidebar while the part is off. */
+    module: moduleIdSchema.optional(),
+  })
+  .strict();
+export type NavLink = z.infer<typeof navLinkSchema>;
+
+/** What the app's public screens may do (see `public-access.ts`). */
+export { publicAccessSchema, publicKeysSchema, type PublicAccess };
+
+/** The bundled sample data file, inside the package's `seeds/` folder. */
+export const sampleDataSchema = z
+  .object({
+    file: z.string().regex(/^seeds\/[a-z0-9][a-z0-9._-]*\.json$/, 'a file in seeds/, ending .json'),
+    /**
+     * A table shared with another app (one with a `shape`) that already holds
+     * real rows — rows no installed app's sample data added — leaves these
+     * tables' sample rows out, so a venue's real menu never gains sample
+     * dishes (nor sample orders of them).
+     */
+    skipWhenShared: z
+      .object({
+        table: z.string().min(1).max(64),
+        skip: z.array(z.string().min(1).max(64)).min(1).max(50),
+      })
+      .strict()
+      .optional(),
+    /**
+     * Rows for an add-on the app names, by the add-on's key: a second sample
+     * file in the app's package (see `sample.ts`). Loaded while that add-on
+     * is connected to the app, and removed with the app's sample data.
+     */
+    addOns: z
+      .record(
+        z.string().regex(/^[a-z][a-z0-9-]{1,79}$/, 'an add-on key'),
+        z.object({ file: z.string().regex(/^seeds\/[a-z0-9][a-z0-9._-]*\.json$/, 'a file in seeds/, ending .json') }).strict(),
+      )
+      .optional(),
+    /**
+     * The people of the sample business: a rep per pipeline, a crew per van.
+     * "Add sample data" makes each a staff member who cannot sign in and is
+     * marked a sample person, with one of the app's own roles; a sample row
+     * names one by key (`{"@person": "dana"}`, see `sample.ts`), and "Remove
+     * sample data" takes them away with their rows. A name is a person's
+     * name: data, written once, in no language.
+     */
+    people: z
+      .array(
+        z
+          .object({
+            key: z.string().regex(/^[a-z][a-z0-9_-]{0,39}$/, 'a short key: lower-case letters, digits, _ and -'),
+            name: z.string().min(1).max(120),
+            /** Shown beside the name; never mailed. Left out, or taken already, Adminium gives the person an address of its own. */
+            email: z.string().max(200).regex(/^[^@\s]+@[^@\s]+$/, 'an email address').optional(),
+            /** One of this app's roles, by its key. */
+            role: z.string().min(1).max(64).optional(),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(200)
+      .optional(),
+    /** Teams of sample people: `lead` reaches the rows of the `members` (and is one of the team). */
+    teams: z
+      .array(
+        z
+          .object({
+            name: z.string().min(1).max(60),
+            lead: z.string().min(1).max(40).optional(),
+            members: z.array(z.string().min(1).max(40)).min(1).max(200),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(50)
+      .optional(),
+  })
+  .strict();
+
+// ── the manifest envelope ─────────────────────────────────────────────────────
+
+/**
+ * The two envelope-wide rules, as plain predicates over the shape both branches
+ * share. They are attached to EACH BRANCH below rather than to the union: a
+ * `.refine()` on a `z.discriminatedUnion` would run against the union type and
+ * lose the narrowing, and moving them up there is how they get silently
+ * dropped.
+ */
+interface SharedEnvelope {
+  capabilities?: Capability[] | undefined;
+  compatibility: z.infer<typeof compatibilitySchema>;
+}
+
+/** Hosted-only and offline-required are mutually exclusive. */
+const capabilitiesNotContradictory = (m: SharedEnvelope): boolean =>
+  !(
+    (m.capabilities?.includes('hosted-only') ?? false) &&
+    (m.capabilities?.includes('offline-required') ?? false)
+  );
+
+/** maxAdminiumVersion (exclusive) must be strictly above the min. */
+const compatibilityWindowOrdered = (m: SharedEnvelope): boolean =>
+  m.compatibility.maxAdminiumVersion === undefined ||
+  compareSemver(m.compatibility.maxAdminiumVersion, m.compatibility.minAdminiumVersion) > 0;
+
+const CAPS_MESSAGE = {
+  message: 'hosted-only and offline-required are mutually exclusive',
+  path: ['capabilities'] as const,
+};
+const WINDOW_MESSAGE = {
+  message: 'maxAdminiumVersion must be greater than minAdminiumVersion',
+  path: ['compatibility'] as const,
+};
+
+/**
+ * At most one entry per side.
+ *
+ * Two `customer` frontends is not a richer app; it is an ambiguity — a
+ * publishable key is minted against ONE side, so a second entry claiming the
+ * same one leaves the installer and the key-minting UI with no way to say which
+ * bundle a key belongs to.
+ */
+function sidesAreDistinct(m: { frontends: readonly { side: string }[] }): boolean {
+  const seen = new Set<string>();
+  for (const f of m.frontends) {
+    if (seen.has(f.side)) return false;
+    seen.add(f.side);
+  }
+  return true;
+}
+
+/**
+ * The phone side is `kind: "expo"` and nothing else, and `expo` is the phone
+ * side's alone. It names no entry, routes, placement or switch: those are a
+ * served web side's.
+ */
+function phoneSideIssues(m: { frontends: readonly Record<string, unknown>[] }): { path: (string | number)[]; message: string }[] {
+  const out: { path: (string | number)[]; message: string }[] = [];
+  m.frontends.forEach((frontend, index) => {
+    const phone = frontend['side'] === PHONE_SIDE;
+    if (phone !== (frontend['kind'] === PHONE_KIND)) {
+      out.push({ path: ['frontends', index, 'kind'], message: `the side "${PHONE_SIDE}" is kind "${PHONE_KIND}", and "${PHONE_KIND}" is that side's alone` });
+    }
+    if (!phone) return;
+    for (const word of ['entry', 'env', 'routes', 'placement', 'enabled']) {
+      if (frontend[word] !== undefined) out.push({ path: ['frontends', index, word], message: `a phone side has no "${word}": it is not served by Adminium` });
+    }
+  });
+  return out;
+}
+
+const SIDES_MESSAGE = {
+  message: 'each side may appear at most once in `frontends`',
+  path: ['frontends'] as const,
+};
+
+/** The prefix Adminium gives an app's tables: its key, `-` as `_`, then `_`. */
+export function prefixFor(appKey: string): string {
+  return `${appKey.replace(/-/g, '_')}_`;
+}
+
+/** The longest real table name every engine accepts (Postgres: 63 bytes). */
+export const MAX_TABLE_NAME = 63;
+
+// ── totals that count and climb, prices by the night, copies that follow ──────
+
+type ShapeTable = RequiredTableShape;
+type ShapeColumn = RequiredTableShape['columns'][number];
+type RulePath = (...rest: (string | number)[]) => (string | number)[];
+
+/** Column types a count is kept in: a whole number. */
+const WHOLE_TYPES: readonly string[] = ['int', 'bigint'];
+
+/** What "the newest" may be read by: a moment, a day, or a number that only grows. */
+const LATEST_BY_TYPES: readonly string[] = ['timestamptz', 'timestamp', 'datetime', 'date', 'int', 'bigint', 'decimal'];
+
+/**
+ * The newest child row's value (`rollup.latest`): `of` and `by` are the
+ * child's columns, the value's column is this table's and may be empty (no
+ * row qualifies yet), of the type it copies; `row` is a plain column of this
+ * table that holds the child's key and nothing else decides.
+ */
+function rollupLatestIssues(
+  index: { column(table: string, ref: string): ShapeColumn | undefined; pk(table: string): ShapeColumn | undefined },
+  table: ShapeTable,
+  column: ShapeColumn,
+  from: string,
+  latest: { of: string; by: string; row?: string | undefined },
+  decide: (table: string, column: string) => void,
+  here: RulePath,
+): ReferenceIssue[] {
+  const out: ReferenceIssue[] = [];
+  const of = index.column(from, latest.of);
+  const by = index.column(from, latest.by);
+  if (of === undefined) out.push({ path: here('rollup', 'latest', 'of'), message: `"${from}" has no column "${latest.of}"` });
+  else if (of.type !== column.type) out.push({ path: here('rollup', 'latest', 'of'), message: `"${from}.${latest.of}" is ${of.type} and "${table.ref}.${column.ref}" is ${column.type}: the newest row's value is kept in a column of its own type` });
+  if (by === undefined) out.push({ path: here('rollup', 'latest', 'by'), message: `"${from}" has no column "${latest.by}"` });
+  else if (!LATEST_BY_TYPES.includes(by.type)) out.push({ path: here('rollup', 'latest', 'by'), message: `"${from}.${latest.by}" is ${by.type}: the newest row is told by a date, a time or a number` });
+  if (column.nullable !== true) out.push({ path: here('rollup', 'latest'), message: `"${table.ref}.${column.ref}" is empty while no row qualifies: make it nullable` });
+  if (latest.row !== undefined) {
+    const row = index.column(table.ref, latest.row);
+    decide(table.ref, latest.row);
+    if (row === undefined) out.push({ path: here('rollup', 'latest', 'row'), message: `"${table.ref}" has no column "${latest.row}"` });
+    else {
+      if (latest.row === column.ref) out.push({ path: here('rollup', 'latest', 'row'), message: 'the row\'s key is kept in a column of its own' });
+      if (row.rules !== undefined) out.push({ path: here('rollup', 'latest', 'row'), message: `"${latest.row}" holds the key of the row Adminium took; it takes no rules of its own` });
+      if (row.nullable !== true) out.push({ path: here('rollup', 'latest', 'row'), message: `"${table.ref}.${latest.row}" is empty while no row qualifies: make it nullable` });
+      // Not a link: the database would refuse to delete the very row the column names, before Adminium could let go of it.
+      if (row.type === 'fk') {
+        out.push({ path: here('rollup', 'latest', 'row'), message: `"${table.ref}.${latest.row}" is a link: the key of the row Adminium took is kept as a plain column (the type of "${from}"'s key), so that row can still be deleted` });
+      } else if (!WHOLE_TYPES.includes(row.type) && row.type !== 'text' && row.type !== 'uuid') {
+        out.push({ path: here('rollup', 'latest', 'row'), message: `"${table.ref}.${latest.row}" holds a key of "${from}": a column of its key's type` });
+      } else {
+        // Held to the key it names: a whole number against a uuid is refused by the database on every write of the total.
+        const key = index.pk(from);
+        if (key === undefined) {
+          out.push({ path: here('rollup', 'latest', 'row'), message: `"${from}" has no key of one column, so the row that was taken cannot be named: leave "row" out` });
+        } else if (!(WHOLE_TYPES.includes(row.type) && WHOLE_TYPES.includes(key.type)) && row.type !== key.type) {
+          out.push({ path: here('rollup', 'latest', 'row'), message: `"${table.ref}.${latest.row}" is ${row.type} and the key of "${from}" is ${key.type}: the key of the row Adminium took is kept in a column of that key's type` });
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * A total adds a column up (`sum`) or counts the rows (`count: true`), and a
+ * count is a whole number with nothing multiplied into it and no balance.
+ */
+function rollupCountIssues(r: NonNullable<ColumnRules['rollup']>, type: string, here: RulePath): ReferenceIssue[] {
+  const out: ReferenceIssue[] = [];
+  if ([r.sum, r.count, r.latest].filter((kind) => kind !== undefined).length !== 1) {
+    out.push({ path: here('rollup'), message: 'a total adds up `sum`, counts rows (`count: true`) or takes the newest row\'s value (`latest`): one of the three' });
+  }
+  if (r.latest !== undefined && (r.times !== undefined || r.balance !== undefined || r.cap !== undefined || r.capUnless !== undefined)) {
+    out.push({ path: here('rollup', 'latest'), message: 'the newest row\'s value takes no `times`, `balance` or `cap`' });
+  }
+  if (r.count === true) {
+    if (r.times !== undefined || r.balance !== undefined || r.cap !== undefined) {
+      out.push({ path: here('rollup', 'count'), message: 'a count takes no `times`, `balance` or `cap`' });
+    }
+    if (!WHOLE_TYPES.includes(type)) out.push({ path: here('rollup', 'count'), message: 'a count is kept in a whole-number column (`int` or `bigint`)' });
+  }
+  return out;
+}
+
+/**
+ * The columns of a table a total decides, and for each the totals it comes
+ * from: a rollup column, a rollup's balance, and a formula that reads one of
+ * them (however many formulas deep).
+ */
+function totalsOf(table: ShapeTable): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>();
+  for (const column of table.columns) {
+    const r = column.rules?.rollup;
+    if (r === undefined) continue;
+    out.set(column.ref, new Set([column.ref]));
+    if (r.balance !== undefined) out.set(r.balance.column, new Set([column.ref]));
+    if (r.latest?.row !== undefined) out.set(r.latest.row, new Set([column.ref]));
+  }
+  const formulas = table.columns.filter((column) => column.rules?.formula !== undefined);
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const column of formulas) {
+      const from = new Set(out.get(column.ref) ?? []);
+      for (const input of formulaColumns(column.rules!.formula!)) for (const total of out.get(input) ?? []) from.add(total);
+      if (from.size > (out.get(column.ref)?.size ?? 0)) {
+        out.set(column.ref, from);
+        changed = true;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Totals that add up other totals (an option's price into its line, the
+ * line into its order, the order into its customer) climb at most three
+ * tables, and never in a circle: a total whose child table is its own, or
+ * two tables adding each other up.
+ */
+function rollupChainIssues(tables: readonly ShapeTable[]): ReferenceIssue[] {
+  const out: ReferenceIssue[] = [];
+  const byRef = new Map(tables.map((t) => [t.ref, t]));
+  const totals = new Map(tables.map((t) => [t.ref, totalsOf(t)]));
+  /** Each rollup, by `table.column`: its path, its child table, and the rollups of the child it reads. */
+  const nodes = new Map<string, { path: (string | number)[]; table: string; child: string; reads: string[] }>();
+  tables.forEach((table, t) => {
+    table.columns.forEach((column, c) => {
+      const r = column.rules?.rollup;
+      if (r === undefined) return;
+      const read = [r.sum, r.times, r.unlessSet, r.where?.column, r.latest?.of, r.latest?.by].filter((ref): ref is string => ref !== undefined);
+      const childTotals = totals.get(r.from) ?? new Map<string, Set<string>>();
+      const reads = new Set<string>();
+      for (const ref of read) for (const total of childTotals.get(ref) ?? []) reads.add(`${r.from}.${total}`);
+      nodes.set(`${table.ref}.${column.ref}`, {
+        path: ['requiredSchema', 'tables', t, 'columns', c, 'rules', 'rollup'],
+        table: table.ref,
+        child: r.from,
+        reads: byRef.has(r.from) ? [...reads] : [],
+      });
+    });
+  });
+  /** The longest chain of tables below a rollup, bottom first, or null for a circle. */
+  const chains = new Map<string, string[] | null>();
+  const chainOf = (key: string, seen: ReadonlySet<string>): string[] | null => {
+    if (chains.has(key)) return chains.get(key)!;
+    const node = nodes.get(key)!;
+    if (seen.has(key) || node.child === node.table) return null;
+    let longest: string[] = [node.child];
+    for (const next of node.reads) {
+      const below = chainOf(next, new Set([...seen, key]));
+      if (below === null) {
+        chains.set(key, null);
+        return null;
+      }
+      if (below.length > longest.length) longest = below;
+    }
+    const chain = [...longest, node.table];
+    chains.set(key, chain);
+    return chain;
+  };
+  for (const [key, node] of nodes) {
+    const chain = chainOf(key, new Set());
+    if (chain === null) {
+      out.push({ path: node.path, message: `totals climb in a circle: ${node.child} → ${node.table}${node.child === node.table ? '' : ' → …'}` });
+    } else if (chain.length - 1 > 3) {
+      out.push({ path: node.path, message: `totals climb at most three tables: ${chain.join(' → ')}` });
+    }
+  }
+  return out;
+}
+
+/**
+ * A copy that follows its row (`follow`): it always wins; it follows one
+ * level (the column it copies is not itself following another row); the row
+ * it follows is not worked out from this table's own totals (a loop); and
+ * this table adds up into that row alone, so every write takes its rows in
+ * one order.
+ */
+function followIssues(
+  tables: readonly ShapeTable[],
+  table: ShapeTable,
+  own: string,
+  copy: NonNullable<ColumnRules['copy']>,
+  here: RulePath,
+): ReferenceIssue[] {
+  const out: ReferenceIssue[] = [];
+  if (copy.mode !== 'always') out.push({ path: here('copy', 'mode'), message: 'a copy that follows its row always wins (`mode: "always"`)' });
+  const parentRef = table.columns.find((c) => c.ref === copy.via)?.references;
+  const parent = tables.find((t) => t.ref === parentRef);
+  if (parent === undefined) return out;
+  const source = parent.columns.find((c) => c.ref === copy.from);
+  if (source?.rules?.copy?.follow === true) out.push({ path: here('copy', 'follow'), message: 'a copy follows one level' });
+  // Everything the parent's column is worked out from, on the parent.
+  const inputs = new Set<string>([copy.from]);
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const ref of [...inputs]) {
+      const rules = parent.columns.find((c) => c.ref === ref)?.rules;
+      const more = [
+        ...(rules?.formula === undefined ? [] : formulaColumns(rules.formula)),
+        ...(rules?.perNight === undefined ? [] : [rules.perNight.from, rules.perNight.to, rules.perNight.rate.via]),
+      ];
+      for (const next of more) if (!inputs.has(next)) {
+        inputs.add(next);
+        changed = true;
+      }
+    }
+  }
+  // What this table's rows move on the parent: its totals, their balances, the formulas over them.
+  const moved = new Set<string>();
+  const parentTotals = totalsOf(parent);
+  for (const column of parent.columns) {
+    if (column.rules?.rollup?.from !== table.ref) continue;
+    for (const [ref, from] of parentTotals) if (from.has(column.ref)) moved.add(ref);
+  }
+  const loop = [...inputs].find((ref) => moved.has(ref));
+  if (loop !== undefined) {
+    out.push({ path: here('copy', 'follow'), message: `"${parent.ref}.${copy.from}" is worked out from "${table.ref}", so "${table.ref}.${own}" cannot follow it` });
+  } else {
+    // A total, a balance or a stamp changes by a settle or a move, never by a change of the row the copies follow:
+    // a copy of one — or of a formula over one — would keep the value it had.
+    const balances = new Set(parent.columns.flatMap((c) => (c.rules?.rollup?.balance === undefined ? [] : [c.rules.rollup.balance.column])));
+    const settled = [...inputs].find((ref) => {
+      const rules = parent.columns.find((c) => c.ref === ref)?.rules;
+      return rules?.rollup !== undefined || rules?.stamp !== undefined || balances.has(ref);
+    });
+    if (settled !== undefined) {
+      const kind = balances.has(settled) ? 'a balance' : parent.columns.find((c) => c.ref === settled)?.rules?.rollup !== undefined ? 'a total' : 'a stamp';
+      const over = settled === copy.from ? '' : ` (it is worked out from "${settled}", ${kind})`;
+      out.push({
+        path: here('copy', 'follow'),
+        message: `"${parent.ref}.${copy.from}"${over === '' ? ` is ${kind}` : over}, which changes without a change of the row, so "${table.ref}.${own}" cannot follow it`,
+      });
+    }
+  }
+  // A follow writes the copy and the formulas over it, and settles the totals into the row it follows only:
+  // a total another table keeps of these rows must read none of what it writes, or that total would go stale.
+  const written = new Set<string>([own]);
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const column of table.columns) {
+      const formula = column.rules?.formula;
+      if (formula === undefined || written.has(column.ref)) continue;
+      if (formulaColumns(formula).some((input) => written.has(input))) {
+        written.add(column.ref);
+        changed = true;
+      }
+    }
+  }
+  for (const other of tables) {
+    if (other.ref === parent.ref) continue;
+    const reads = other.columns.some((c) => {
+      const rollup = c.rules?.rollup;
+      if (rollup?.from !== table.ref) return false;
+      // The link a total groups its rows by counts too: a copy that moves a row to another parent moves it between that table's totals.
+      return [rollup.via, rollup.sum, rollup.times, rollup.unlessSet, rollup.where?.column, rollup.latest?.of, rollup.latest?.by].some((ref) => ref !== undefined && written.has(ref));
+    });
+    if (reads) {
+      out.push({ path: here('copy', 'follow'), message: `"${table.ref}" totals into "${other.ref}" too, so its copies cannot follow "${parent.ref}": a total "${other.ref}" keeps reads what the follow writes` });
+    }
+  }
+  return out;
+}
+
+/**
+ * The columns a money figure Adminium works out reads, per table: a
+ * formula's inputs, what a total adds up, and a column copied into one of
+ * those (a stay's guests into each extra's). What a limit counts is not money
+ * and is left out.
+ */
+function figureColumns(tables: readonly ShapeTable[]): (table: string) => ReadonlySet<string> {
+  const out = new Map<string, Set<string>>(tables.map((t) => [t.ref, new Set<string>()]));
+  const mark = (table: string, column: string): boolean => {
+    const set = out.get(table);
+    if (set === undefined || set.has(column)) return false;
+    set.add(column);
+    return true;
+  };
+  for (const table of tables) {
+    for (const column of table.columns) {
+      const rules = column.rules;
+      if (rules?.formula !== undefined) for (const input of formulaColumns(rules.formula)) mark(table.ref, input);
+      const r = rules?.rollup;
+      if (r !== undefined) for (const input of [r.sum, r.times, r.latest?.of]) if (input !== undefined) mark(r.from, input);
+    }
+  }
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const table of tables) {
+      for (const column of table.columns) {
+        const copy = column.rules?.copy;
+        if (copy === undefined || !out.get(table.ref)?.has(column.ref)) continue;
+        const source = table.columns.find((c) => c.ref === copy.via)?.references;
+        if (source !== undefined && mark(source, copy.from)) changed = true;
+      }
+    }
+  }
+  return (table) => out.get(table) ?? new Set();
+}
+
+/** A price by the night: its dates, its rate, and the adjustments it reads. */
+function perNightIssues(
+  index: TableIndex<ShapeColumn>,
+  table: ShapeTable,
+  column: ShapeColumn,
+  rule: z.infer<typeof perNightSchema>,
+  keptFromReaders: (table: string, column: string, into: ColumnRules | undefined, intoAt?: { table: string; column: string }) => string | null,
+  here: RulePath,
+): ReferenceIssue[] {
+  const out: ReferenceIssue[] = [];
+  const at = (...rest: (string | number)[]) => here('perNight', ...rest);
+  if (!['decimal', 'money', 'int', 'bigint'].includes(column.type)) {
+    out.push({ path: at(), message: 'a price by the night is kept in a decimal, money or whole-number column' });
+  }
+  const first = table.columns.find((c) => c.rules?.perNight !== undefined);
+  if (first !== undefined && first.ref !== column.ref) out.push({ path: at(), message: `"${table.ref}" is already priced by the night in "${first.ref}"; a table has one such price` });
+  for (const name of ['from', 'to'] as const) {
+    const found = index.column(table.ref, rule[name]);
+    if (found === undefined) out.push({ path: at(name), message: `"${table.ref}" has no column "${rule[name]}"` });
+    else if (found.type !== 'date') out.push({ path: at(name), message: `"${table.ref}.${rule[name]}" is not a date` });
+  }
+  if (rule.from === rule.to) out.push({ path: at('to'), message: 'the nights run between two different dates' });
+  if (rule.of !== undefined) {
+    const link = index.column(table.ref, rule.of.via);
+    const parent = link?.type === 'fk' ? link.references : undefined;
+    if (parent === undefined) out.push({ path: at('of', 'via'), message: `"${rule.of.via}" is not a foreign key of "${table.ref}"` });
+    else {
+      const priced = index.table(parent)?.columns.find((c) => c.ref === rule.of!.column);
+      if (priced === undefined) out.push({ path: at('of', 'column'), message: `"${parent}" has no column "${rule.of.column}"` });
+      else if (priced.rules?.perNight === undefined) out.push({ path: at('of', 'column'), message: `"${parent}.${rule.of.column}" is not priced by the night` });
+      else if (priced.rules.perNight.of !== undefined) out.push({ path: at('of', 'column'), message: `"${parent}.${rule.of.column}" is itself a part of another price; a part is of a whole` });
+    }
+  }
+  const via = index.column(table.ref, rule.rate.via);
+  const target = via?.type === 'fk' ? via.references : undefined;
+  if (target === undefined) {
+    out.push({ path: at('rate', 'via'), message: `"${rule.rate.via}" is not a foreign key of "${table.ref}"` });
+  } else {
+    const rate = index.column(target, rule.rate.column);
+    if (rate === undefined) out.push({ path: at('rate', 'column'), message: `"${target}" has no column "${rule.rate.column}"` });
+    else if (!NUMERIC_TYPES.includes(rate.type) || rate.type === 'float') out.push({ path: at('rate', 'column'), message: `"${target}.${rule.rate.column}" is not a price` });
+    else {
+      const kept = keptFromReaders(target, rule.rate.column, column.rules, { table: table.ref, column: column.ref });
+      if (kept !== null) out.push({ path: at('rate', 'column'), message: `"${target}.${rule.rate.column}" is ${kept}, so no price reads it` });
+    }
+  }
+  const adjust = rule.adjust;
+  if (adjust === undefined) return out;
+  if (index.table(adjust.table) === undefined) {
+    out.push({ path: at('adjust', 'table'), message: `"${adjust.table}" is not a table of this app` });
+    return out;
+  }
+  const own = (name: string) => index.column(adjust.table, name);
+  const add = own(adjust.add);
+  if (add === undefined) out.push({ path: at('adjust', 'add'), message: `"${adjust.table}" has no column "${adjust.add}"` });
+  else if (!NUMERIC_TYPES.includes(add.type) || add.type === 'float') out.push({ path: at('adjust', 'add'), message: `"${adjust.table}.${adjust.add}" is not a price` });
+  const name = own(adjust.name);
+  if (name === undefined) out.push({ path: at('adjust', 'name'), message: `"${adjust.table}" has no column "${adjust.name}"` });
+  else if (name.type !== 'text') out.push({ path: at('adjust', 'name'), message: `"${adjust.table}.${adjust.name}" is not a text column` });
+  else {
+    const kept = keptFromReaders(adjust.table, adjust.name, column.rules, { table: table.ref, column: column.ref });
+    if (kept !== null) out.push({ path: at('adjust', 'name'), message: `"${adjust.table}.${adjust.name}" is ${kept}, so no night is tagged with it` });
+  }
+  const match = adjust.match;
+  if (match.via !== undefined) {
+    const link = own(match.via);
+    if (link?.type !== 'fk' || link.references === undefined) {
+      out.push({ path: at('adjust', 'match', 'via'), message: `"${match.via}" is not a foreign key of "${adjust.table}"` });
+    } else if (target !== undefined && link.references !== target) {
+      out.push({ path: at('adjust', 'match', 'via'), message: `"${adjust.table}.${match.via}" points at "${link.references}", and "${table.ref}.${rule.rate.via}" at "${target}"` });
+    }
+  }
+  if (match.weekdays !== undefined) {
+    const weekdays = own(match.weekdays);
+    if (weekdays === undefined) out.push({ path: at('adjust', 'match', 'weekdays'), message: `"${adjust.table}" has no column "${match.weekdays}"` });
+    else if (weekdays.type !== 'text' || (weekdays.maxLength !== undefined && weekdays.maxLength < 27)) {
+      out.push({ path: at('adjust', 'match', 'weekdays'), message: `"${adjust.table}.${match.weekdays}" lists nights like "mon,tue,wed,thu,fri,sat,sun": a text column of at least 27 characters` });
+    }
+  }
+  for (const bound of ['from', 'to'] as const) {
+    const ref = match[bound];
+    if (ref === undefined) continue;
+    const found = own(ref);
+    if (found === undefined) out.push({ path: at('adjust', 'match', bound), message: `"${adjust.table}" has no column "${ref}"` });
+    else if (found.type !== 'date') out.push({ path: at('adjust', 'match', bound), message: `"${adjust.table}.${ref}" is not a date` });
+  }
+  if (adjust.where !== undefined) {
+    const filter = own(adjust.where.column);
+    if (filter === undefined) out.push({ path: at('adjust', 'where'), message: `"${adjust.table}" has no column "${adjust.where.column}"` });
+    else if (!valueFits(filter, adjust.where.eq)) out.push({ path: at('adjust', 'where'), message: `${JSON.stringify(adjust.where.eq)} is not a value of "${adjust.table}.${adjust.where.column}"` });
+    else if (filter.nullable === true) out.push({ path: at('adjust', 'where'), message: `"${adjust.table}.${adjust.where.column}" may be empty, so a row could drop out unseen; make it not nullable` });
+  }
+  return out;
+}
+
+/**
+ * Every name a manifest's own blocks use must name something the manifest
+ * declares: a rule's columns, a capacity's or a booking's columns and tables,
+ * a public table and the columns it reads and writes, the outbox and its
+ * templates. Checked here so an app's CI refuses a typo long before an
+ * operator's install would.
+ */
+export function appReferenceIssues(
+  m: {
+    key: string;
+    /** Absent: not a file made on an Adminium. */
+    publisher?: { id: string } | undefined;
+    requiredSchema: { tables: readonly RequiredTableShape[]; prefixed?: true | undefined };
+    publicAccess?: readonly PublicAccess[] | undefined;
+    publicKeys?: z.infer<typeof publicKeysSchema> | undefined;
+    optionLists?: Readonly<Record<string, unknown>> | undefined;
+    roles?: readonly RoleShape[] | undefined;
+    outbox?: z.infer<typeof outboxSchema> | undefined;
+    emailTemplates?: readonly z.infer<typeof emailTemplateSchema>[] | undefined;
+    addOns?: AddOnNeeds | undefined;
+    documents?: readonly AppDocument[] | undefined;
+    pages?: readonly { ref?: string | undefined; feature?: string | undefined }[] | undefined;
+    /** An add-on's own ledgers, parsed: its tables' postings may go into them. Present (even empty) only for an add-on. */
+    ledgers?: readonly Ledger[] | undefined;
+    automations?: readonly ManifestAutomation[] | undefined;
+    /** The settings the manifest declares, which a working week or a cut-off may name. */
+    settings?: readonly { key: string; type: string }[] | undefined;
+    /** `add-on` for an add-on's own blocks; absent or `app` for an app's. */
+    kind?: string | undefined;
+    /** An add-on's code page refs (`addOn.pages`), which a state action's link may open. */
+    codePages?: readonly string[] | undefined;
+  },
+  /**
+   * When the tables are an add-on's shape rather than an app's: the add-on's
+   * own key and setting keys, which its rules may read, and no roles to name.
+   */
+  shapeOf?: { addOn: string; settings: readonly string[] },
+  /** Filled with the columns Adminium decides on each table, for a reader that needs them (`decidedColumnsOf`). */
+  sink?: { decided?: Map<string, ReadonlySet<string>> },
+): { path: (string | number)[]; message: string }[] {
+  const out: { path: (string | number)[]; message: string }[] = [];
+  const index = tableIndex(m.requiredSchema.tables);
+  const tables = new Map(m.requiredSchema.tables.map((t) => [t.ref, t]));
+  const has = index.has;
+  /** Whether the rule at `path` is of a table that sits in a part whose feature needs `addOn`: the table is there only while the add-on is. */
+  const inPartOf = (path: (string | number)[], addOn: string): boolean => {
+    if (path[0] !== 'requiredSchema' || path[1] !== 'tables' || typeof path[2] !== 'number') return false;
+    const table = m.requiredSchema.tables[path[2]];
+    return table !== undefined && shapeIsOptional(m, table, addOn);
+  };
+  /** A setting a rule reads must be there when the rule runs. */
+  const settingIssue = (source: SettingSource, path: (string | number)[]) => {
+    if ('addOn' in source) {
+      if (shapeOf !== undefined) {
+        if (source.addOn !== shapeOf.addOn) out.push({ path, message: `a shape reads only its own add-on's settings, not "${source.addOn}"` });
+        else if (!shapeOf.settings.includes(source.setting)) out.push({ path, message: `"${source.addOn}" has no setting "${source.setting}"` });
+      } else if (!requiresAddOn(m.addOns, source.addOn) && !inPartOf(path, source.addOn)) {
+        out.push({ path, message: `"${source.addOn}" is not required by the app (addOns.requires), so its setting may not be there` });
+      }
+    } else if (!has(source.table, source.column)) {
+      out.push({ path, message: `"${source.table}" has no column "${source.column}"` });
+    }
+  };
+  /**
+   * Why a column is kept from readers — a secret, personal data, the code a
+   * shared link opens its row with — or null when it is not, or when the
+   * column a rule lands it in is kept the same way (a secret in a secret;
+   * personal data in personal data or a secret). A copy of one, or a formula
+   * over one, would show it where it is not kept, past the audit's and the
+   * outbox's redaction and the public refusals. A shared link's code, and any
+   * code no staff member reads (`code.hiddenFromStaff`), is never landed
+   * anywhere.
+   *
+   * Personal data is told as the install tells it: by its mark, or guessed by
+   * its name (`email`, a guest's `first_name` beside an address), and so is
+   * the column it lands in when `intoAt` names it. Told by the mark alone, a
+   * formula over a guessed column into an unmarked one passed here and was
+   * then skipped by the install, leaving the column empty.
+   */
+  /**
+   * Whether a column is a code that leaves only as a shared link: one an
+   * entry claims by (`claim: { by: 'token' }`), or one no staff member reads
+   * (`code.hiddenFromStaff`). Nothing copies one, keeps its newest value, its
+   * last four or a ledger's copy of it, and no public entry shows it.
+   */
+  const linkCode = (tableRef: string, columnRef: string): boolean => shareCodeColumns(m.publicAccess ?? [], tableRef, index).includes(columnRef);
+  const keptFromReaders = (
+    tableRef: string,
+    columnRef: string,
+    into: ColumnRules | undefined,
+    intoAt?: { table: string; column: string },
+  ): string | null => {
+    if (linkCode(tableRef, columnRef)) return 'the code a shared link opens its row with';
+    const source = tables.get(tableRef)?.columns.find((x) => x.ref === columnRef)?.rules;
+    if (source?.secret === true && into?.secret !== true) return 'a secret';
+    const personal = (t: string, c: string): boolean => {
+      const doc = tables.get(t);
+      return doc !== undefined && personalColumn(doc as Parameters<typeof personalColumn>[0], c) !== null;
+    };
+    if (!personal(tableRef, columnRef) || into?.secret === true) return null;
+    const intoPersonal = intoAt === undefined ? into?.personal === true : personal(intoAt.table, intoAt.column);
+    return intoPersonal ? null : 'personal data';
+  };
+  /** The tables the app's signed-in people are rows of (its claim identities). */
+  const identityTables = new Set((m.publicAccess ?? []).filter((e) => e.claim !== undefined).map((e) => e.table));
+  /** Per table, the columns Adminium decides and no writer may set. */
+  const decided = new Map<string, Set<string>>();
+  const decide = (table: string, column: string) => {
+    const set = decided.get(table) ?? new Set<string>();
+    set.add(column);
+    decided.set(table, set);
+  };
+
+  m.requiredSchema.tables.forEach((table, t) => {
+    const at = (...rest: (string | number)[]) => ['requiredSchema', 'tables', t, ...rest];
+    if (m.requiredSchema.prefixed === true && prefixFor(m.key).length + table.ref.length > MAX_TABLE_NAME) {
+      out.push({ path: at('ref'), message: `"${prefixFor(m.key)}${table.ref}" is longer than ${String(MAX_TABLE_NAME)} characters` });
+    }
+    const balances = new Map<string, string>();
+    table.columns.forEach((column) => {
+      const balance = column.rules?.rollup?.balance;
+      if (balance !== undefined) balances.set(balance.column, column.ref);
+    });
+    table.columns.forEach((column, c) => {
+      const rules = column.rules;
+      if (rules === undefined) return;
+      const here = (...rest: (string | number)[]) => at('columns', c, 'rules', ...rest);
+      const deciders = (['copy', 'sequence', 'code', 'rollup', 'stamp', 'formula', 'format', 'default', 'lookup', 'band', 'perNight'] as const).filter(
+        (name) => rules[name] !== undefined,
+      );
+      if (deciders.length > 0) decide(table.ref, column.ref);
+      // One rule decides a column; two would race for its value. A copy with
+      // a default behind it is the one pair that means something.
+      const racing = deciders.filter((name) => !(name === 'default' && rules.copy !== undefined) && !(name === 'copy' && rules.default !== undefined));
+      if (racing.length > 1 && rules.stamp === undefined) {
+        out.push({ path: here(), message: `a column is decided by one rule, and this one has ${racing.join(', ')}` });
+      }
+      if (rules.retryKey === true) {
+        // A 43-letter hash that finds its one row, sent by nobody but the save it keeps.
+        if (column.type !== 'text') out.push({ path: here('retryKey'), message: 'a retry key is kept in text' });
+        if (column.unique !== true) out.push({ path: here('retryKey'), message: 'a retry key finds one row by its key, so it is unique' });
+        if (column.nullable !== true) out.push({ path: here('retryKey'), message: 'a save sent without a retry key keeps none, so the column is nullable' });
+        if (typeof column.maxLength === 'number' && column.maxLength < 43) out.push({ path: here('retryKey'), message: 'a retry key is kept as 43 letters, so maxLength is at least 43' });
+        if (table.columns.some((other) => other !== column && other.rules?.retryKey === true)) out.push({ path: here('retryKey'), message: `"${table.ref}" keeps its retry key in one column` });
+      }
+      if (rules.normalize !== undefined && column.type !== 'text') {
+        out.push({ path: here('normalize'), message: 'only text is stored trimmed or in lower case' });
+      }
+      // A bound compares like with like: dates, numbers, or times of day kept as text (`HH:MM`).
+      const boundKind = boundKindOf(column.type);
+      if ((rules.notAfter !== undefined || rules.notBefore !== undefined) && boundKind === null) {
+        out.push({ path: here(rules.notAfter !== undefined ? 'notAfter' : 'notBefore'), message: 'only a date, a number or a time of day is kept on one side of another' });
+      }
+      if (rules.notAfter === 'today' && boundKind !== 'date') out.push({ path: here('notAfter'), message: 'only a date is kept not later than today' });
+      if (rules.notBefore === 'now' && column.type !== 'timestamptz') out.push({ path: here('notBefore'), message: 'only a moment (timestamptz) is kept not before now' });
+      if ((rules.notAfter !== undefined || rules.notBefore !== undefined) && boundKind === 'time' && typeof column.maxLength === 'number' && column.maxLength < 5) {
+        out.push({ path: here(rules.notAfter !== undefined ? 'notAfter' : 'notBefore'), message: 'a time of day is kept as the 5 characters of HH:MM, so maxLength is at least 5' });
+      }
+      for (const side of ['notBefore', 'notAfter'] as const) {
+        const bound = rules[side];
+        if (bound === undefined || bound === 'today' || bound === 'now') continue;
+        if (bound.days !== undefined && boundKind !== 'date') out.push({ path: here(side, 'days'), message: 'days are counted between dates only' });
+        let owner = table.ref;
+        if (bound.via !== undefined) {
+          const via = index.column(table.ref, bound.via);
+          if (via?.type !== 'fk' || via.references === undefined) {
+            out.push({ path: here(side, 'via'), message: `"${table.ref}.${bound.via}" is not a foreign key` });
+            owner = '';
+          } else {
+            owner = via.references;
+          }
+        }
+        if (owner !== '') {
+          const other = index.column(owner, bound.column);
+          const kind = other === undefined ? null : boundKindOf(other.type);
+          if (other === undefined) out.push({ path: here(side, 'column'), message: `"${owner}" has no column "${bound.column}"` });
+          else if (boundKind !== null && kind !== boundKind) out.push({ path: here(side, 'column'), message: `"${owner}.${bound.column}" is not ${BOUND_KIND_WORDS[boundKind]}` });
+          else if (bound.via === undefined && other.ref === column.ref) out.push({ path: here(side, 'column'), message: 'a value is bounded by another column' });
+        }
+        // The conditions read this row, as the write leaves it.
+        (bound.when ?? []).forEach((condition, w) => out.push(...conditionIssues(table.ref, condition, index, here(side, 'when', w))));
+        if (Array.isArray(bound.strict)) bound.strict.forEach((condition, w) => out.push(...conditionIssues(table.ref, condition, index, here(side, 'strict', w))));
+      }
+      if (rules.linkable !== undefined) {
+        // The conditions read the row the link names, so the column is a link and they name that table's columns.
+        if (column.type !== 'fk' || column.references === undefined) {
+          out.push({ path: here('linkable'), message: 'only a foreign key names a row, so only one takes linkable' });
+        } else {
+          const linked = column.references;
+          (rules.linkable.where ?? []).forEach((condition, w) => {
+            out.push(...conditionIssues(linked, condition, index, here('linkable', 'where', w)));
+            // A refusal says whether the named row meets the condition: never asked of a value kept from every reader.
+            if (tables.get(linked)?.columns.find((x) => x.ref === condition.column)?.rules?.secret === true) {
+              out.push({ path: here('linkable', 'where', w, 'column'), message: `"${linked}.${condition.column}" is a secret, and a link is never judged by one` });
+            }
+          });
+          // What a column holds as a value to compare: a link holds the key of the row it names.
+          const held = (of: NonNullable<ReturnType<typeof index.column>>): string => (of.type === 'fk' && of.references !== undefined ? (index.pk(of.references)?.type ?? 'fk') : of.type).replace(/^bigint$/, 'int');
+          (rules.linkable.same ?? []).forEach((pair, p) => {
+            const at = (...rest: (string | number)[]) => here('linkable', 'same', p, ...rest);
+            const theirs = index.column(linked, pair.column);
+            if (theirs === undefined) out.push({ path: at('column'), message: `"${linked}" has no column "${pair.column}"` });
+            else if (theirs.rules?.secret === true) out.push({ path: at('column'), message: `"${linked}.${pair.column}" is a secret, and a link is never judged by one` });
+            // This row's side: a column of its own, or one of the row a link of it names.
+            const [first, second] = pair.as.split('.') as [string, string | undefined];
+            const own = index.column(table.ref, first);
+            let ours: ReturnType<typeof index.column>;
+            if (own === undefined) out.push({ path: at('as'), message: `"${table.ref}" has no column "${first}"` });
+            else if (second === undefined) {
+              if (own.ref === column.ref) out.push({ path: at('as'), message: 'a link is compared with another column, not with itself' });
+              else ours = own;
+            } else if (own.type !== 'fk' || own.references === undefined) out.push({ path: at('as'), message: `"${table.ref}.${first}" is not a foreign key, so it names no row to read "${second}" of` });
+            else {
+              ours = index.column(own.references, second);
+              if (ours === undefined) out.push({ path: at('as'), message: `"${own.references}" has no column "${second}"` });
+              else if (ours.rules?.secret === true) out.push({ path: at('as'), message: `"${own.references}.${second}" is a secret, and a link is never judged by one` });
+            }
+            if (theirs !== undefined && ours !== undefined && held(theirs) !== held(ours)) {
+              out.push({ path: at('as'), message: `"${linked}.${pair.column}" holds ${held(theirs)} and "${pair.as}" holds ${held(ours)}: they never hold the same value` });
+            }
+          });
+        }
+      }
+      if (rules.requiredWhen !== undefined) {
+        const when = rules.requiredWhen;
+        const other = index.column(table.ref, when.column);
+        if (other === undefined) out.push({ path: here('requiredWhen', 'column'), message: `"${table.ref}" has no column "${when.column}"` });
+        else if (other.ref === column.ref) out.push({ path: here('requiredWhen', 'column'), message: 'a column is required by another column' });
+        else {
+          for (const value of when.in) {
+            if (!valueFits(other, value)) out.push({ path: here('requiredWhen', 'in'), message: `${JSON.stringify(value)} is not a value of "${table.ref}.${when.column}"` });
+          }
+        }
+        // Never empty already, or always asked for: the condition would say nothing.
+        if (column.nullable !== true) out.push({ path: here('requiredWhen'), message: 'a column required only sometimes may be empty the rest of the time, so make it nullable' });
+        if (rules.required === true) out.push({ path: here('requiredWhen'), message: 'a column is required always, or only when another column says so, not both' });
+        // A copy that only fills what a write leaves out still leaves a person to ask when there is nothing to copy.
+        const fillsWhatIsLeftOut = deciders.length === 1 && deciders[0] === 'copy' && (rules.copy?.mode ?? 'default') === 'default' && rules.copy?.follow !== true;
+        // A stamp fills a person's write, never a write that brings history: a won deal brought in carries its own closed date, or is named.
+        const stampedLive = deciders.length === 1 && deciders[0] === 'stamp';
+        if (deciders.length > 0 && !fillsWhatIsLeftOut && !stampedLive) out.push({ path: here('requiredWhen'), message: 'Adminium fills this column, so nobody is asked for it' });
+      }
+      if (rules.default !== undefined) {
+        const from = rules.default.from;
+        if (from === 'connection.currency') {
+          if (column.type !== 'text' || (column.maxLength !== undefined && column.maxLength < 3)) {
+            out.push({ path: here('default', 'from'), message: 'a currency is three letters: a text column of at least 3 characters' });
+          }
+        } else {
+          settingIssue(from, here('default', 'from'));
+        }
+        if (column.nullable !== true) out.push({ path: here('default'), message: 'a column filled from elsewhere may start empty, so make it nullable' });
+      }
+      if (rules.sequence !== undefined) {
+        const seq = rules.sequence;
+        if (seq.start !== undefined && seq.startSetting !== undefined) out.push({ path: here('sequence'), message: 'a running number starts at start or at startSetting, not both' });
+        if (seq.gapless === true) {
+          if (column.type !== 'int' && column.type !== 'bigint') out.push({ path: here('sequence', 'gapless'), message: 'a number without gaps is a whole number: an int column' });
+          // Rows added as samples, and rows imported with a number of their own, carry none.
+          if (column.nullable !== true) out.push({ path: here('sequence', 'gapless'), message: 'a numbered column is nullable: sample rows carry no number' });
+        } else if (seq.scope !== undefined || seq.startSetting !== undefined) {
+          out.push({ path: here('sequence'), message: 'scope and startSetting number without gaps: add gapless' });
+        }
+        if (seq.sample === true) {
+          if (seq.gapless !== true) out.push({ path: here('sequence', 'sample'), message: 'only a number without gaps is kept from sample rows: a plain running number needs no "sample"' });
+          // A document built on an add-on's shape is numbered for the tax office: a sample row removed later would leave a hole in it.
+          if (table.builtOn !== undefined) out.push({ path: here('sequence', 'sample'), message: `"${table.ref}" is built on an add-on's document: its numbers are never a sample row's` });
+        }
+        if (seq.startSetting !== undefined) settingIssue(seq.startSetting, here('sequence', 'startSetting'));
+        if (seq.scope !== undefined) {
+          const scope = index.column(table.ref, seq.scope);
+          if (scope?.type !== 'fk') out.push({ path: here('sequence', 'scope'), message: `"${seq.scope}" is not a foreign key of "${table.ref}"` });
+        }
+      }
+      if (rules.format !== undefined) {
+        const f = rules.format;
+        const from = index.column(table.ref, f.from);
+        if (from?.rules?.sequence === undefined) out.push({ path: here('format', 'from'), message: `"${f.from}" is not a running number of "${table.ref}"` });
+        if (column.type !== 'text') out.push({ path: here('format'), message: 'a number with a prefix is written into a text column' });
+        if (f.prefix !== undefined && f.prefixSetting !== undefined) out.push({ path: here('format'), message: 'a prefix is written here or read from a setting, not both' });
+        if (f.prefixSetting !== undefined) settingIssue(f.prefixSetting, here('format', 'prefixSetting'));
+        if (column.maxLength !== undefined && (f.prefix ?? '').length + (f.pad ?? 0) > column.maxLength) {
+          out.push({ path: here('format'), message: `"${table.ref}.${column.ref}" holds ${String(column.maxLength)} characters, fewer than the prefix and the padding` });
+        }
+        if (column.nullable !== true) out.push({ path: here('format'), message: 'a numbered column is nullable: sample rows carry their own text' });
+      }
+      // A list the app ships, or one Adminium has built in; nothing else exists
+      // on every install.
+      if (rules.options !== undefined && 'list' in rules.options) {
+        const list = rules.options.list;
+        if (!list.startsWith('builtin:') && m.optionLists?.[list] === undefined) {
+          out.push({ path: here('options', 'list'), message: `"${list}" is not one of the app's option lists` });
+        }
+      }
+      if (rules.copy !== undefined) {
+        const via = table.columns.find((x) => x.ref === rules.copy!.via);
+        if (via?.type !== 'fk' || via.references === undefined) {
+          out.push({ path: here('copy', 'via'), message: `"${rules.copy.via}" is not a foreign key of "${table.ref}"` });
+        } else if (!has(via.references, rules.copy.from)) {
+          out.push({ path: here('copy', 'from'), message: `"${via.references}" has no column "${rules.copy.from}"` });
+        } else {
+          const kept = keptFromReaders(via.references, rules.copy.from, column.rules, { table: table.ref, column: column.ref });
+          if (kept !== null) out.push({ path: here('copy', 'from'), message: `"${via.references}.${rules.copy.from}" is ${kept}, so no column copies it` });
+        }
+        if (rules.copy.follow === true) out.push(...followIssues(m.requiredSchema.tables, table, column.ref, rules.copy, here));
+        // A copy may read through a link another copy fills, never round in a loop.
+        const seen = new Set([column.ref]);
+        for (let via: string | undefined = rules.copy.via; via !== undefined; via = table.columns.find((x) => x.ref === via)?.rules?.copy?.via) {
+          if (seen.has(via)) {
+            out.push({ path: here('copy', 'via'), message: `"${column.ref}" is copied through a loop of copies: "${via}" comes round again` });
+            break;
+          }
+          seen.add(via);
+        }
+      }
+      if (rules.perNight !== undefined) {
+        if (shapeOf !== undefined) out.push({ path: here('perNight'), message: 'a shape does not price by the night' });
+        out.push(...perNightIssues(index, table, column, rules.perNight, keptFromReaders, here));
+      }
+      // The same of a stamp that copies a column of its row, and of a formula's inputs.
+      const stamped = rules.stamp?.set;
+      if (typeof stamped === 'object' && 'copy' in stamped) {
+        const kept = keptFromReaders(table.ref, stamped.copy, column.rules, { table: table.ref, column: column.ref });
+        if (kept !== null) out.push({ path: here('stamp', 'set', 'copy'), message: `"${table.ref}.${stamped.copy}" is ${kept}, so no column copies it` });
+      }
+      if (rules.formula !== undefined) {
+        for (const input of formulaColumns(rules.formula)) {
+          const kept = keptFromReaders(table.ref, input, column.rules, { table: table.ref, column: column.ref });
+          if (kept !== null) out.push({ path: here('formula'), message: `"${table.ref}.${input}" is ${kept}, so no formula reads it` });
+        }
+      }
+      if (rules.rollup !== undefined) {
+        const r = rules.rollup;
+        const child = tables.get(r.from);
+        const via = child?.columns.find((x) => x.ref === r.via);
+        if (child === undefined) {
+          out.push({ path: here('rollup', 'from'), message: `"${r.from}" is not a table of this app` });
+        } else if (via?.type !== 'fk' || via.references !== table.ref) {
+          out.push({ path: here('rollup', 'via'), message: `"${r.from}.${r.via}" does not point at "${table.ref}"` });
+        } else {
+          for (const name of [...(r.sum === undefined ? [] : [r.sum]), ...(r.times === undefined ? [] : [r.times]), ...(r.unlessSet === undefined ? [] : [r.unlessSet])]) {
+            if (!has(r.from, name)) out.push({ path: here('rollup'), message: `"${r.from}" has no column "${name}"` });
+          }
+          if (r.latest !== undefined) out.push(...rollupLatestIssues(index, table, column, r.from, r.latest, decide, here));
+          // A kept total of a shared link's code would show it on the parent, to whoever reads the parent.
+          if (r.latest !== undefined && linkCode(r.from, r.latest.of)) {
+            out.push({ path: here('rollup', 'latest', 'of'), message: `"${r.from}.${r.latest.of}" is the code a shared link opens its row with, so no total keeps it` });
+          }
+          if (r.where !== undefined) {
+            const filter = index.column(r.from, r.where.column);
+            if (filter === undefined) out.push({ path: here('rollup', 'where'), message: `"${r.from}" has no column "${r.where.column}"` });
+            else if (!valueFits(filter, r.where.eq)) out.push({ path: here('rollup', 'where'), message: `${JSON.stringify(r.where.eq)} is not a value of "${r.from}.${r.where.column}"` });
+            // An empty value equals nothing: a row left empty would drop out of the total unseen.
+            else if (filter.nullable === true) out.push({ path: here('rollup', 'where'), message: `"${r.from}.${r.where.column}" may be empty, so a row could drop out of the total; make it not nullable` });
+          }
+        }
+        if (r.balance !== undefined) {
+          const b = r.balance;
+          decide(table.ref, b.column);
+          for (const [name, ref] of [['column', b.column], ['of', b.of], ...(b.minus ?? []).map((x) => ['minus', x] as const)] as const) {
+            const found = index.column(table.ref, ref);
+            if (found === undefined) out.push({ path: here('rollup', 'balance', name), message: `"${table.ref}" has no column "${ref}"` });
+            else if (!NUMERIC_TYPES.includes(found.type)) out.push({ path: here('rollup', 'balance', name), message: `"${table.ref}.${ref}" is not a number` });
+          }
+          if ([b.of, ...(b.minus ?? [])].includes(b.column) || b.column === column.ref) {
+            out.push({ path: here('rollup', 'balance', 'column'), message: 'the balance is a column of its own' });
+          }
+          if (index.column(table.ref, b.column)?.rules !== undefined) {
+            out.push({ path: here('rollup', 'balance', 'column'), message: `"${b.column}" is the balance Adminium keeps; it takes no rules of its own` });
+          }
+        }
+        // A cap holds a balance at zero: this rollup's, or the one that takes
+        // this total away (a write-off is capped by the balance it lowers).
+        if (r.cap === true && r.balance === undefined) {
+          const capped = table.columns.some((x) => x.rules?.rollup?.balance?.minus?.includes(column.ref) === true);
+          if (!capped) out.push({ path: here('rollup', 'cap'), message: 'a cap needs a balance: declare one here, or subtract this total in one' });
+        }
+        if (r.capUnless !== undefined) {
+          const flag = index.column(table.ref, r.capUnless.column);
+          if (r.cap !== true) out.push({ path: here('rollup', 'capUnless'), message: 'capUnless lifts a cap: say "cap": true beside it' });
+          if (flag === undefined) out.push({ path: here('rollup', 'capUnless', 'column'), message: `"${table.ref}" has no column "${r.capUnless.column}"` });
+          else if (flag.type !== 'bool' || flag.nullable === true) out.push({ path: here('rollup', 'capUnless', 'column'), message: `"${table.ref}.${flag.ref}" says yes or no for every row: a bool that is not nullable` });
+        }
+        // One scale: a balance, what it starts from, what it takes away and what is summed are all the same decimals.
+        if (r.balance !== undefined && child !== undefined && r.sum !== undefined) {
+          const scaleOf = (found: { type: string; scale?: number | 'currency' | undefined } | undefined) => (found === undefined || !['decimal', 'money'].includes(found.type) ? undefined : (found.scale ?? 'default'));
+          const parts: [string, ReturnType<typeof scaleOf>][] = [
+            [`${table.ref}.${r.balance.column}`, scaleOf(index.column(table.ref, r.balance.column) as never)],
+            [`${table.ref}.${r.balance.of}`, scaleOf(index.column(table.ref, r.balance.of) as never)],
+            ...(r.balance.minus ?? []).map((ref): [string, ReturnType<typeof scaleOf>] => [`${table.ref}.${ref}`, scaleOf(index.column(table.ref, ref) as never)]),
+            [`${table.ref}.${column.ref}`, scaleOf(column as never)],
+            [`${r.from}.${r.sum}`, scaleOf(index.column(r.from, r.sum) as never)],
+          ];
+          const scales = new Set(parts.map(([, scale]) => scale).filter((scale) => scale !== undefined));
+          if (scales.size > 1 && r.times === undefined) {
+            out.push({ path: here('rollup', 'balance'), message: `a balance and its parts keep one scale: ${parts.filter(([, scale]) => scale !== undefined).map(([name, scale]) => `${name} ${scale === 'default' ? '(none said)' : String(scale)}`).join(', ')}` });
+          }
+        }
+        out.push(...rollupCountIssues(r, column.type, here));
+      }
+      if (rules.stamp !== undefined) {
+        const stamp = rules.stamp;
+        if (stamp.notEarlier === true && column.type !== 'date' && column.type !== 'timestamptz') {
+          out.push({ path: here('stamp', 'notEarlier'), message: 'a stamp kept from moving earlier needs a date or timestamptz column' });
+        }
+        const set = stamp.set;
+        // A strict stamp is the server's on every write: a staff writer's own word (`byOrigin` with no `staff`) would be theirs.
+        if (stamp.strict === true && typeof set === 'object' && 'byOrigin' in set && set.byOrigin.staff === undefined) {
+          out.push({ path: here('stamp', 'strict'), message: 'a strict stamp is always the server\'s, so a staff write says its value too (byOrigin.staff)' });
+        }
+        if (set === 'now' && column.type !== 'timestamptz') {
+          out.push({ path: here('stamp', 'set'), message: 'a "now" stamp needs a timestamptz column' });
+        } else if (set === 'today' && column.type !== 'date') {
+          out.push({ path: here('stamp', 'set'), message: 'a "today" stamp needs a date column' });
+        } else if ((set === 'user-name' || set === 'user-id') && column.type !== 'text') {
+          out.push({ path: here('stamp', 'set'), message: `a "${set}" stamp needs a text column` });
+        } else if (typeof set === 'object' && 'byOrigin' in set) {
+          for (const value of [set.byOrigin.public, ...(set.byOrigin.staff === undefined ? [] : [set.byOrigin.staff])]) {
+            if (!valueFits(column, value)) out.push({ path: here('stamp', 'set'), message: `"${value}" is not a value of "${table.ref}.${column.ref}"` });
+          }
+        } else if (typeof set === 'object' && 'copy' in set) {
+          const source = index.column(table.ref, set.copy);
+          if (source === undefined) out.push({ path: here('stamp', 'set', 'copy'), message: `"${table.ref}" has no column "${set.copy}"` });
+          else if (source.ref === column.ref) out.push({ path: here('stamp', 'set', 'copy'), message: 'a stamp copies another column' });
+          else if (source.type !== column.type) out.push({ path: here('stamp', 'set', 'copy'), message: `"${table.ref}.${set.copy}" is a ${source.type}, and "${column.ref}" a ${column.type}` });
+        } else if (typeof set === 'object' && 'claim' in set) {
+          if (column.type !== 'text') out.push({ path: here('stamp', 'set'), message: 'a stamp from the signed-in person needs a text column' });
+          if (![...identityTables].some((identity) => has(identity, set.claim))) {
+            out.push({ path: here('stamp', 'set', 'claim'), message: `no table the app's people sign in as has a column "${set.claim}"` });
+          }
+        } else if (typeof set === 'object' && 'addDays' in set) {
+          const a = set.addDays;
+          if (column.type !== 'date') out.push({ path: here('stamp', 'set'), message: 'a date worked out from another needs a date column' });
+          const from = index.column(table.ref, a.date);
+          if (from === undefined) out.push({ path: here('stamp', 'set', 'addDays', 'date'), message: `"${table.ref}" has no column "${a.date}"` });
+          else if (from.type !== 'date' && from.type !== 'timestamptz') out.push({ path: here('stamp', 'set', 'addDays', 'date'), message: `"${table.ref}.${a.date}" is not a date` });
+          if (typeof a.days === 'string') {
+            const days = index.column(table.ref, a.days);
+            if (days === undefined) {
+              out.push({ path: here('stamp', 'set', 'addDays', 'days'), message: `"${table.ref}" has no column "${a.days}"` });
+            } else if (days.type === 'enum' || days.type === 'text') {
+              const missing = (days.enum ?? []).filter((value) => a.map?.[value] === undefined);
+              if (a.map === undefined || missing.length > 0) {
+                out.push({ path: here('stamp', 'set', 'addDays', 'map'), message: `each value of "${table.ref}.${a.days}" needs its days${missing.length > 0 ? ` (${missing.join(', ')})` : ''}` });
+              }
+            } else if (days.type !== 'int' && days.type !== 'bigint') {
+              out.push({ path: here('stamp', 'set', 'addDays', 'days'), message: `"${table.ref}.${a.days}" is neither a number of days nor a choice with a map` });
+            }
+          }
+        } else if (typeof set === 'object' && 'addWorkingDays' in set) {
+          out.push(...workingDaysIssues(table, column, set.addWorkingDays, here('stamp', 'set', 'addWorkingDays'), index, m.settings ?? []));
+        } else if (typeof set === 'object' && 'hashOf' in set) {
+          const h = set.hashOf;
+          if (column.type !== 'text' || (column.maxLength !== undefined && column.maxLength < 64)) {
+            out.push({ path: here('stamp', 'set'), message: 'a fingerprint is 64 characters: a text column of at least 64' });
+          }
+          for (const ref of h.columns) if (!has(table.ref, ref)) out.push({ path: here('stamp', 'set', 'hashOf', 'columns'), message: `"${table.ref}" has no column "${ref}"` });
+          const childIssues = (parent: string, child: { table: string; via: string; columns: readonly string[]; orderBy?: string | undefined }, path: (string | number)[]) => {
+            if (index.table(child.table) === undefined) {
+              out.push({ path, message: `"${child.table}" is not a table of this manifest` });
+              return;
+            }
+            const via = index.column(child.table, child.via);
+            if (via?.type !== 'fk' || via.references !== parent) out.push({ path, message: `"${child.table}.${child.via}" does not point at "${parent}"` });
+            for (const ref of [...child.columns, ...(child.orderBy === undefined ? [] : [child.orderBy])]) {
+              if (!has(child.table, ref)) out.push({ path, message: `"${child.table}" has no column "${ref}"` });
+            }
+          };
+          (h.children ?? []).forEach((child, k) => childIssues(table.ref, child, here('stamp', 'set', 'hashOf', 'children', k)));
+          (h.linked ?? []).forEach((link, k) => {
+            const path = here('stamp', 'set', 'hashOf', 'linked', k);
+            const via = index.column(table.ref, link.via);
+            if (via?.type !== 'fk' || via.references !== link.table) {
+              out.push({ path, message: `"${table.ref}.${link.via}" does not point at "${link.table}"` });
+              return;
+            }
+            for (const ref of link.columns) if (!has(link.table, ref)) out.push({ path, message: `"${link.table}" has no column "${ref}"` });
+            (link.children ?? []).forEach((child, c2) => childIssues(link.table, child, [...path, 'children', c2]));
+          });
+        }
+        if (typeof set === 'object' && 'moment' in set) {
+          if (column.type !== 'timestamptz') out.push({ path: here('stamp', 'set'), message: 'a stamped moment needs a timestamptz column' });
+          out.push(...momentIssues(table.ref, set.moment, index, here('stamp', 'set', 'moment')));
+          const read = [set.moment, ...(set.moment.or ?? [])].flatMap((m) => [m.via ?? m.column]);
+          if (read.includes(column.ref)) out.push({ path: here('stamp', 'set', 'moment'), message: 'a stamped moment is worked out from other columns, not its own' });
+        }
+        if (typeof set === 'object' && ('addMinutes' in set || 'deadline' in set)) {
+          if (column.type !== 'timestamptz') out.push({ path: here('stamp', 'set'), message: 'a stamped moment needs a timestamptz column' });
+          const whole = (amount: unknown, path: (string | number)[]) => {
+            if (typeof amount !== 'object' || amount === null) return;
+            const setting = amount as { table: string; column: string };
+            const found = index.column(setting.table, setting.column);
+            if (index.table(setting.table) === undefined) out.push({ path, message: `"${setting.table}" is not a table of this manifest` });
+            else if (found === undefined) out.push({ path, message: `"${setting.table}" has no column "${setting.column}"` });
+            else if (found.type !== 'int' && found.type !== 'bigint') out.push({ path, message: `"${setting.table}.${setting.column}" is not a whole number` });
+          };
+          if ('addMinutes' in set) {
+            whole(set.addMinutes.minutes, here('stamp', 'set', 'addMinutes', 'minutes'));
+            whole(set.addMinutes.hours, here('stamp', 'set', 'addMinutes', 'hours'));
+            if (set.addMinutes.notAfter !== undefined) out.push(...momentIssues(table.ref, set.addMinutes.notAfter, index, here('stamp', 'set', 'addMinutes', 'notAfter')));
+          } else {
+            const d = set.deadline;
+            whole(d.days, here('stamp', 'set', 'deadline', 'days'));
+            if (typeof d.time === 'object') {
+              const found = index.column(d.time.table, d.time.column);
+              const path = here('stamp', 'set', 'deadline', 'time');
+              if (index.table(d.time.table) === undefined) out.push({ path, message: `"${d.time.table}" is not a table of this manifest` });
+              else if (found === undefined) out.push({ path, message: `"${d.time.table}" has no column "${d.time.column}"` });
+              else if (found.type !== 'text') out.push({ path, message: `"${d.time.table}.${d.time.column}" is not a text column holding HH:MM` });
+              else if (found.maxLength !== undefined && found.maxLength < 5) out.push({ path, message: `"${d.time.table}.${d.time.column}" holds fewer than the 5 characters of HH:MM` });
+            }
+            if (d.notAfter !== undefined) out.push(...momentIssues(table.ref, d.notAfter, index, here('stamp', 'set', 'deadline', 'notAfter')));
+          }
+        }
+        const triggers = Array.isArray(stamp.on) ? stamp.on : [stamp.on];
+        triggers.forEach((trigger, k) => {
+          if (trigger === 'create') return;
+          const path = Array.isArray(stamp.on) ? here('stamp', 'on', k) : here('stamp', 'on');
+          if ('columns' in trigger) {
+            for (const ref of trigger.columns) {
+              if (!has(table.ref, ref)) out.push({ path: [...path, 'columns'], message: `"${table.ref}" has no column "${ref}"` });
+              else if (ref === column.ref) out.push({ path: [...path, 'columns'], message: 'a stamp watches another column' });
+            }
+            return;
+          }
+          const watched = index.column(table.ref, trigger.column);
+          if (watched === undefined) {
+            out.push({ path: [...path, 'column'], message: `"${table.ref}" has no column "${trigger.column}"` });
+          } else if (watched.ref === column.ref) {
+            out.push({ path: [...path, 'column'], message: 'a stamp watches another column' });
+          } else if ('values' in trigger) {
+            for (const value of trigger.values) {
+              if (!valueFits(watched, value)) out.push({ path: [...path, 'values'], message: `${JSON.stringify(value)} is not a value of "${table.ref}.${watched.ref}"` });
+            }
+          } else if (watched.nullable !== true) {
+            out.push({ path: [...path, 'filled'], message: `"${table.ref}.${watched.ref}" is never empty, so it is never first filled` });
+          }
+        });
+        const others = (['copy', 'sequence', 'code', 'rollup', 'formula', 'format', 'default', 'lookup', 'band', 'perNight'] as const).filter((name) => rules[name] !== undefined);
+        if (others.length > 0) out.push({ path: here('stamp'), message: `a stamped column is not also decided by ${others.join(', ')}` });
+        if (stamp.clearOnBack === true) out.push(...clearOnBackIssues(table, column, triggers, here('stamp', 'clearOnBack')));
+      }
+      if ((rules.sequence !== undefined || rules.code !== undefined) && column.role === 'pk') {
+        out.push({ path: here(), message: 'a primary key numbers itself; it takes no sequence or code rule' });
+      }
+      if (rules.code?.renew !== undefined) out.push(...codeRenewIssues(table, column, rules.code.renew, here('code', 'renew')));
+      if (rules.lookup !== undefined) {
+        out.push(...codeLookupIssues(table, column, rules.lookup, here('lookup'), { index, tables, shareCodes: (ref) => shareCodeColumns(m.publicAccess ?? [], ref, index) }));
+      }
+      if (rules.band !== undefined) out.push(...bandIssues(table, column, rules.band, here('band'), tables));
+      if (rules.addOnLink !== undefined) {
+        const link = rules.addOnLink;
+        if (!['int', 'bigint', 'text'].includes(column.type) || column.nullable !== true || column.references !== undefined) {
+          out.push({ path: here('addOnLink'), message: `a link into an add-on is a nullable int, bigint or text column with no "references": the add-on may not be there` });
+        }
+        const others = (['copy', 'sequence', 'code', 'rollup', 'stamp', 'formula', 'format', 'band', 'perNight'] as const).filter((name) => rules[name] !== undefined);
+        if (others.length > 0) out.push({ path: here('addOnLink'), message: `a link into an add-on is filled by a person, a lookup or the settings row, not by ${others.join(', ')}` });
+        if (rules.default !== undefined) {
+          /*
+           * The one default a link takes: the same link, kept once on the
+           * settings row (the shelf a practice's supplies leave). Anything
+           * else would put a value there that names no row of the add-on.
+           */
+          const from = rules.default.from;
+          const allowed = 'a link into an add-on takes its default only from a column of the settings row that links into the same table of the same add-on';
+          const source = typeof from === 'string' || 'addOn' in from ? undefined : (index.column(from.table, from.column) as { type?: string; rules?: ColumnRules } | undefined);
+          const theirs = source?.rules?.addOnLink;
+          if (typeof from === 'string' || 'addOn' in from) {
+            out.push({ path: here('default', 'from'), message: allowed });
+          } else if (source !== undefined) {
+            // A column that is not there is the default's own issue, said above.
+            if (theirs === undefined) out.push({ path: here('default', 'from'), message: `${allowed}: "${from.table}.${from.column}" links into none` });
+            else if (theirs.addOn !== link.addOn) out.push({ path: here('default', 'from'), message: `${allowed}: "${from.table}.${from.column}" links into "${theirs.addOn}", not "${link.addOn}"` });
+            else if (theirs.table !== link.table) out.push({ path: here('default', 'from'), message: `${allowed}: "${from.table}.${from.column}" links into "${theirs.table}", not "${link.table}"` });
+            else if (source.type !== column.type) out.push({ path: here('default', 'from'), message: `${allowed}, kept as the same type: "${from.table}.${from.column}" is ${String(source.type)}, not ${column.type}` });
+          }
+        }
+        if (shapeOf !== undefined) {
+          if (link.addOn !== shapeOf.addOn) out.push({ path: here('addOnLink', 'addOn'), message: `a shape links only into its own add-on's tables, not "${link.addOn}"` });
+        } else if (link.addOn === m.key) {
+          out.push({ path: here('addOnLink', 'addOn'), message: 'a link into its own table is a foreign key: use type "fk" and "references"' });
+        } else if (![...(m.addOns?.requires ?? []), ...(m.addOns?.suggests ?? [])].some((need) => need.key === link.addOn)) {
+          out.push({ path: here('addOnLink', 'addOn'), message: `"${link.addOn}" is not an add-on this manifest names: add it to addOns.requires or addOns.suggests` });
+        }
+      }
+      if (rules.tableRef !== undefined && (column.type !== 'text' || column.maxLength === undefined)) {
+        out.push({ path: here('tableRef'), message: 'a table name is kept in a text column with maxLength' });
+      }
+      // A person's id is text on every database: a number or a uuid column would compare with nothing.
+      if (rules.mentions !== undefined) {
+        if (column.type !== 'text') out.push({ path: here('mentions'), message: `people are mentioned in a text column, and "${table.ref}.${column.ref}" is ${column.type}` });
+        if (table.private === true) out.push({ path: here('mentions'), message: 'a private table tells nobody of what is written in it: no mentions' });
+        const about = typeof rules.mentions === 'object' ? rules.mentions.about : undefined;
+        const link = about === undefined ? undefined : table.columns.find((candidate) => candidate.ref === about);
+        if (about !== undefined && (link === undefined || link.type !== 'fk')) out.push({ path: here('mentions', 'about'), message: `"${table.ref}.${about}" is not a link of this table` });
+      }
+      if (rules.staff !== undefined && column.type !== 'text') {
+        out.push({ path: here('staff'), message: 'a staff member is kept in a text column' });
+      }
+      // A position and an area are kept whole, as JSON: two number columns or a text column are not one.
+      if (rules.place !== undefined && column.type !== 'json') {
+        out.push({ path: here('place'), message: `a place is kept in a json column, and "${table.ref}.${column.ref}" is ${column.type}` });
+      }
+      if (rules.area !== undefined && column.type !== 'json') {
+        out.push({ path: here('area'), message: `an area is kept in a json column, and "${table.ref}.${column.ref}" is ${column.type}` });
+      }
+      if (rules.place !== undefined && rules.area !== undefined) {
+        out.push({ path: here('area'), message: 'a column holds a place or an area, not both' });
+      }
+      if (rules.file !== undefined) {
+        // One file is its id in a text column; a list of them is kept whole, as JSON.
+        if (column.type === 'text') {
+          if (rules.file.maxCount !== undefined) out.push({ path: here('file', 'maxCount'), message: 'a text column holds one file; keep a list of them in a json column' });
+          if (column.maxLength !== undefined && column.maxLength < 31) out.push({ path: here('file'), message: "a file's id is 31 characters, so maxLength is at least 31" });
+        } else if (column.type === 'json') {
+          if (rules.file.maxCount === undefined) out.push({ path: here('file', 'maxCount'), message: 'say how many files the list may hold (maxCount)' });
+        } else {
+          out.push({ path: here('file'), message: `a file is kept in a text column, a list of files in a json column, and "${table.ref}.${column.ref}" is ${column.type}` });
+        }
+        if (new Set(rules.file.accept).size !== rules.file.accept.length) out.push({ path: here('file', 'accept'), message: 'each kind of file is named once' });
+        // What a guest uploads is a file the column takes, no larger, and no more of them than it holds.
+        const upload = rules.file.upload;
+        if (upload !== undefined) {
+          if (new Set(upload.kinds).size !== upload.kinds.length) out.push({ path: here('file', 'upload', 'kinds'), message: 'each kind of file is named once' });
+          for (const kind of upload.kinds) {
+            const as = FILE_UPLOAD_KINDS[kind];
+            if (!(rules.file.accept as readonly string[]).includes(as)) out.push({ path: here('file', 'upload', 'kinds'), message: `a guest's "${kind}" file is one the column takes: add "${as}" to accept` });
+          }
+          if (upload.maxBytes > rules.file.maxBytes) out.push({ path: here('file', 'upload', 'maxBytes'), message: `a guest's file is no larger than the column takes (${String(rules.file.maxBytes)} bytes)` });
+          if (upload.maxCount !== undefined) {
+            if (rules.file.maxCount === undefined) out.push({ path: here('file', 'upload', 'maxCount'), message: 'the column holds one file, so a guest uploads one' });
+            else if (upload.maxCount > rules.file.maxCount) out.push({ path: here('file', 'upload', 'maxCount'), message: `a guest uploads no more files than the column holds (${String(rules.file.maxCount)})` });
+          }
+        }
+        // An image column that holds files holds pictures.
+        if ((column as { semantic?: string }).semantic === 'image' && !takesPicturesOnly(rules.file.accept)) {
+          out.push({ path: here('file', 'accept'), message: `"${table.ref}.${column.ref}" is an image column, so its files are pictures: ${PICTURE_FILE_KINDS.join(', ')}` });
+        }
+        // What the column holds is a file a person uploaded: no rule of Adminium's makes one, and no two rows share one.
+        const others = (Object.keys(rules) as (keyof ColumnRules)[]).filter((name) => !['file', 'personal', 'required', 'requiredWhen', 'history'].includes(name));
+        if (others.length > 0) out.push({ path: here('file'), message: `a file column holds what a person uploaded, not also ${others.join(', ')}` });
+        if (column.unique === true) out.push({ path: at('columns', c, 'unique'), message: 'a file column holds a file nobody else holds already: it is not also unique' });
+        if ((column as { default?: unknown }).default !== undefined) out.push({ path: at('columns', c, 'default'), message: 'a file column takes no default: a file is uploaded' });
+      }
+      if (rules.plainText !== undefined && column.type !== 'text') {
+        out.push({ path: here('plainText'), message: 'plain text is a rule of a text column' });
+      }
+      if (rules.changes !== undefined) out.push(...changeGuardIssues(index, table.ref, column, rules.changes, here));
+      if (rules.announce !== undefined) {
+        // Told from the settle, which has the row before and after only for a formula over one of its own totals.
+        const reads = rules.formula === undefined ? [] : formulaColumns(rules.formula);
+        const total = reads.some((ref) => {
+          const read = index.column(table.ref, ref) as { rules?: ColumnRules } | undefined;
+          return read?.rules?.rollup !== undefined || table.columns.some((x) => x.rules?.rollup?.balance?.column === ref);
+        });
+        if (rules.formula === undefined || !total) {
+          out.push({ path: here('announce'), message: 'a change is announced of a formula column that reads a total of its own row (a rollup, or its balance)' });
+        }
+        if (column.type === 'money') out.push({ path: here('announce'), message: 'a money total is not announced: announce a flag or a state worked out from it (an int)' });
+      }
+      if (rules.customerKey !== undefined) {
+        const of = index.column(table.ref, rules.customerKey.of);
+        if (column.type !== 'text' || column.maxLength !== 64 || column.nullable !== true) {
+          out.push({ path: here('customerKey'), message: 'a customer key is a nullable text column of 64 characters' });
+        }
+        if (of === undefined) out.push({ path: here('customerKey', 'of'), message: `"${table.ref}" has no column "${rules.customerKey.of}"` });
+        else if (of.type !== 'text' || of.ref === column.ref) out.push({ path: here('customerKey', 'of'), message: `"${table.ref}.${of.ref}" is not a text column holding an address` });
+        const others = (['copy', 'sequence', 'code', 'rollup', 'stamp', 'formula', 'format', 'default', 'lookup', 'band', 'perNight'] as const).filter((name) => rules[name] !== undefined);
+        if (others.length > 0) out.push({ path: here('customerKey'), message: `a customer key is worked out from its address, not also decided by ${others.join(', ')}` });
+        decide(table.ref, column.ref);
+      }
+      if (rules.codeLast4 !== undefined) {
+        const of = index.column(table.ref, rules.codeLast4.of) as { ref: string; rules?: ColumnRules } | undefined;
+        if (column.type !== 'text' || column.nullable !== true) out.push({ path: here('codeLast4'), message: 'the last four of a code are kept in a nullable text column' });
+        if (of === undefined) out.push({ path: here('codeLast4', 'of'), message: `"${table.ref}" has no column "${rules.codeLast4.of}"` });
+        else {
+          // A code Adminium makes, or one a person types that a look-up on this table reads (a gift card's code on a payment).
+          const typed = table.columns.some((other) => (other.rules as ColumnRules | undefined)?.lookup?.from === of.ref);
+          if ((of.rules?.code === undefined && !typed) || of.ref === column.ref) out.push({ path: here('codeLast4', 'of'), message: `"${table.ref}.${of.ref}" is neither a code Adminium makes (rules.code) nor a code a look-up reads (rules.lookup.from)` });
+          // A link's code is shown nowhere, not even in part: its last four would narrow the guess to a quarter of it.
+          else if (linkCode(table.ref, of.ref)) out.push({ path: here('codeLast4', 'of'), message: `"${table.ref}.${of.ref}" is the code a shared link opens its row with, so no column keeps its last four` });
+        }
+        const others = (['copy', 'sequence', 'code', 'rollup', 'stamp', 'formula', 'format', 'default', 'lookup', 'band', 'perNight'] as const).filter((name) => rules[name] !== undefined);
+        if (others.length > 0) out.push({ path: here('codeLast4'), message: `the last four of a code are copied from it, not also decided by ${others.join(', ')}` });
+        decide(table.ref, column.ref);
+      }
+    });
+    if (table.columns.filter((column) => column.rules?.lookup !== undefined).length > 2) {
+      out.push({ path: at('columns'), message: 'a table resolves at most two typed codes' });
+    }
+    if (table.columns.filter((column) => column.rules?.announce !== undefined).length > 4) {
+      out.push({ path: at('columns'), message: 'a table announces at most four columns' });
+    }
+    if (table.adjust !== undefined) {
+      // The reductions, who gave one, whether the customer was proved, the links a typed code fills: all Adminium's.
+      for (const [of, columns] of adjustDecidedColumns(table.ref, table.adjust)) for (const ref of columns) decide(of, ref);
+      const named = new Set([...(m.addOns?.requires ?? []), ...(m.addOns?.suggests ?? [])].map((need) => need.key));
+      out.push(
+        ...adjustIssues(
+          table as unknown as AdjustTableShape,
+          table.adjust,
+          {
+            key: shapeOf?.addOn ?? m.key,
+            kind: shapeOf !== undefined || m.ledgers !== undefined ? 'add-on' : 'app',
+            tables: tables as unknown as ReadonlyMap<string, AdjustTableShape>,
+            named,
+            features: new Map((m.addOns?.features ?? []).map((feature) => [feature.id, feature.requires])),
+            formulaReads: (of, ref) => {
+              const formula = index.column(of, ref)?.rules?.formula;
+              return formula === undefined ? null : formulaColumns(formula);
+            },
+            publicWritable: (of) => new Set((m.publicAccess ?? []).filter((entry) => entry.table === of).flatMap((entry) => entry.writable ?? [])),
+          },
+          at,
+        ),
+      );
+    }
+    if (table.check !== undefined) {
+      out.push(
+        ...checkIssues(
+          table as unknown as CheckTableShape,
+          table.check,
+          {
+            key: shapeOf?.addOn ?? m.key,
+            kind: shapeOf !== undefined || m.kind === 'add-on' ? 'add-on' : 'app',
+            tables: tables as unknown as ReadonlyMap<string, CheckTableShape>,
+            named: new Set([...(m.addOns?.requires ?? []), ...(m.addOns?.suggests ?? [])].map((need) => need.key)),
+            features: new Map((m.addOns?.features ?? []).map((feature) => [feature.id, feature.requires])),
+          },
+          at,
+        ),
+      );
+    }
+    if (table.postings !== undefined) {
+      // What a posting makes Adminium's own: how long a hold lasts, and an amount its ledger decides — on the row, or on the parent its lines belong to.
+      for (const [p, posting] of table.postings.entries()) {
+        const parentRef = posting.via === undefined ? undefined : table.columns.find((x) => x.ref === posting.via)?.references;
+        // A receipt names its parent row, its line and its rule, not the lines' table: two tables of lines under one parent need two rule ids.
+        if (parentRef !== undefined) {
+          const twin = [...tables.values()].find(
+            (other) => other.ref < table.ref && (other.postings ?? []).some((theirs) => theirs.id === posting.id && theirs.via !== undefined && other.columns.find((x) => x.ref === theirs.via)?.references === parentRef),
+          );
+          if (twin !== undefined) out.push({ path: at('postings', p, 'id'), message: `"${twin.ref}" has a posting "${posting.id}" for lines of "${parentRef}" too: give the two different ids` });
+        }
+        const own = (mapping: unknown) => {
+          if (typeof mapping === 'string') decide(table.ref, mapping);
+          else if (parentRef !== undefined && typeof mapping === 'object' && mapping !== null && 'parent' in mapping) decide(parentRef, String((mapping as { parent: unknown }).parent));
+        };
+        if (posting.heldUntil !== undefined) own(posting.heldUntil);
+        // A ledger's row is the add-on's, read by whoever reads its ledger: a shared link's code is never copied into one.
+        for (const [input, mapping] of Object.entries(posting.map)) {
+          const read = typeof mapping === 'string' ? { table: table.ref, column: mapping } : parentRef !== undefined && typeof mapping === 'object' && mapping !== null && 'parent' in mapping ? { table: parentRef, column: String((mapping as { parent: unknown }).parent) } : undefined;
+          if (read !== undefined && linkCode(read.table, read.column)) {
+            out.push({ path: at('postings', p, 'map', input), message: `"${read.table}.${read.column}" is the code a shared link opens its row with, so no posting copies it into a ledger` });
+          }
+        }
+        const action = (m.ledgers ?? []).find((ledger) => ledger.id === posting.into.ledger && posting.into.addOn === m.key)?.actions[posting.into.action];
+        for (const rule of action?.decides ?? []) {
+          const mapping = posting.map[rule.input];
+          if (mapping === undefined) continue;
+          own(mapping);
+          // Adminium writes the amount there: never over the row's key, nor over the state its moves are judged by.
+          if (typeof mapping !== 'string') continue;
+          if (table.columns.find((x) => x.ref === mapping)?.role === 'pk') out.push({ path: at('postings', p, 'map', rule.input), message: `"${rule.input}" is decided by Adminium and written to "${table.ref}.${mapping}", which is the row's key` });
+          else if (table.states?.column === mapping) out.push({ path: at('postings', p, 'map', rule.input), message: `"${rule.input}" is decided by Adminium and written to "${table.ref}.${mapping}", which keeps the row's state` });
+        }
+      }
+      out.push(
+        ...postingIssues(
+          table as LedgerTableShape,
+          {
+            key: shapeOf?.addOn ?? m.key,
+            kind: shapeOf !== undefined || m.ledgers !== undefined ? 'add-on' : 'app',
+            tables: tables as ReadonlyMap<string, LedgerTableShape>,
+            named: new Set([...(m.addOns?.requires ?? []), ...(m.addOns?.suggests ?? [])].map((need) => need.key)),
+            features: new Map((m.addOns?.features ?? []).map((feature) => [feature.id, feature.requires])),
+            ledgers: m.ledgers ?? [],
+          },
+          at,
+        ),
+      );
+    }
+    if (table.capacity !== undefined) out.push(...capacityIssues(table, table.capacity, index, at));
+    if (table.booking !== undefined) {
+      out.push(...bookingIssues(table, table.booking, index, at));
+      // The late flag is Adminium's to set.
+      if (table.booking.cancel?.flag !== undefined) decide(table.ref, table.booking.cancel.flag);
+    }
+    if (table.occupies !== undefined) {
+      out.push(...occupiesIssues(table, table.occupies, index, at));
+      // One lock a write: a table's rows are placed by one of the three rules, never two.
+      if (table.booking !== undefined) out.push({ path: at('occupies'), message: 'a table carries "booking" or "occupies", not both' });
+      if (table.capacity !== undefined) out.push({ path: at('occupies'), message: 'a table carries "capacity" or "occupies", not both' });
+    }
+    out.push(...tableFormulaIssues(table.columns, (c, ...rest) => at('columns', c, ...rest)));
+    if (table.states !== undefined) {
+      out.push(
+        ...statesIssues(
+          table.ref,
+          table.states,
+          {
+            index,
+            roles: shapeOf !== undefined ? undefined : (m.roles ?? []).map((role) => role.key),
+            numbered: table.columns.some((c) => c.rules?.sequence?.gapless === true),
+            keptFromReaders: (column) => keptFromReaders(table.ref, column, undefined),
+            decided: (column) => decided.get(table.ref)?.has(column) === true,
+            bookingCancel: table.booking?.cancel === undefined ? undefined : table.booking.cancel.when,
+            statesOf: (ref) => tables.get(ref)?.states,
+            bookedOf: (ref) => tables.get(ref)?.booking !== undefined || tables.get(ref)?.occupies !== undefined,
+            lineOf: (ref) => [...tables.values()].find((other) => other.states?.children?.[ref] !== undefined)?.ref,
+            outboxTable: m.outbox?.table,
+            limitedOf: (ref) => tables.get(ref)?.capacity !== undefined,
+            pages: new Set((m.pages ?? []).flatMap((page) => ('ref' in page && typeof page.ref === 'string' ? [page.ref] : []))),
+            codePages: new Set(m.codePages ?? []),
+          },
+          (...rest) => at('states', ...rest),
+        ),
+      );
+      // A late move's flag is Adminium's to set, as a booking's is.
+      for (const late of table.states.late ?? []) if (late.flag !== undefined) decide(table.ref, late.flag);
+    }
+    if (table.builtOn !== undefined && shapeOf === undefined) {
+      const addOn = table.builtOn.split('/')[0]!;
+      if (!requiresAddOn(m.addOns, addOn) && !shapeIsOptional(m, table, addOn)) {
+        out.push({
+          path: at('builtOn'),
+          message: `"${addOn}" defines the shape, so the app requires it (addOns.requires), or the table sits in a module whose feature needs "${addOn}"`,
+        });
+      }
+    }
+  });
+
+  out.push(...rollupChainIssues(m.requiredSchema.tables));
+
+  out.push(
+    ...publicAccessIssues(m.publicAccess ?? [], {
+      index,
+      appKey: m.key,
+      decided: (table) => decided.get(table) ?? new Set(),
+      answersAvailability: (table) => tables.get(table)?.capacity !== undefined || tables.get(table)?.booking !== undefined,
+      addOns: new Set([...(m.kind === 'add-on' ? [m.key] : []), ...[...(m.addOns?.requires ?? []), ...(m.addOns?.suggests ?? [])].map((need) => need.key)]),
+      ridesAppKeys: m.kind === 'add-on',
+      local: m.publisher?.id === LOCAL_PUBLISHER_ID,
+      capacityOf: (table) => tables.get(table)?.capacity,
+      figures: figureColumns(m.requiredSchema.tables),
+      mailsOnCreate: (table) => (m.outbox?.producers ?? []).some((producer) => 'onCreate' in producer && producer.onCreate.table === table),
+      publicKeys: m.publicKeys,
+      roles: m.roles ?? [],
+      outbox: m.outbox,
+    }),
+  );
+  out.push(...viaIndexIssues(m.requiredSchema.tables));
+  out.push(...settingTableIssues(m));
+  out.push(...slotPartyIssues(m));
+  out.push(...outboxIssues(m, index));
+  const staffColumn = (table: string, column: string): boolean => tables.get(table)?.columns.find((c) => c.ref === column)?.rules?.staff === true;
+  out.push(...belongsIssues(m.requiredSchema.tables, index, staffColumn));
+  out.push(...roleLimitIssues(m.roles ?? [], index, rowTablesOf(m.requiredSchema.tables)));
+  out.push(...privateTableIssues(m as unknown as Record<string, unknown>, m.requiredSchema.tables.filter((table) => table.private === true).map((table) => table.ref)));
+  out.push(...storedTotalIssues(m.requiredSchema.tables as never, (m.roles ?? []) as never));
+  out.push(...privateShapeIssues(m.requiredSchema.tables as never));
+  out.push(...removalIssues(m.requiredSchema.tables));
+  // Whose a row is, is an app's to say for now: an add-on's tables are shared by every app that names it.
+  if (m.kind === 'add-on') {
+    m.requiredSchema.tables.forEach((table, t) => {
+      for (const key of ['belongs', 'private'] as const) {
+        if (table[key] !== undefined) out.push({ path: ['requiredSchema', 'tables', t, key], message: `"${key}" is not read on an add-on's table yet` });
+      }
+      table.columns.forEach((column, c) => {
+        if (column.rules?.staff !== undefined) out.push({ path: ['requiredSchema', 'tables', t, 'columns', c, 'rules', 'staff'], message: 'a staff column is not read on an add-on\'s table yet' });
+      });
+    });
+  }
+  // What an app's role may be given of an add-on's table: the add-on's to say, of its own tables.
+  if (m.kind === 'add-on') out.push(...appGrantsIssues(m.requiredSchema.tables as unknown as readonly AppGrantTableShape[], m.ledgers ?? []));
+  else {
+    m.requiredSchema.tables.forEach((table, t) => {
+      if ((table as { appGrants?: unknown }).appGrants !== undefined) out.push({ path: ['requiredSchema', 'tables', t, 'appGrants'], message: 'an app\'s table is granted by its own roles: "appGrants" is how an add-on says what an app may be given of its tables' });
+    });
+  }
+  // A role's grants on an add-on's tables: an app's to give, on the add-ons it names.
+  if ((m.roles ?? []).some((role) => (role as { tables?: unknown }).tables !== undefined)) {
+    const roles = (m.roles ?? []) as readonly { key: string; tables?: z.infer<typeof roleAddOnTablesSchema> }[];
+    if (m.kind === 'add-on') {
+      roles.forEach((role, r) => {
+        if (role.tables !== undefined) out.push({ path: ['roles', r, 'tables'], message: 'an add-on\'s role grants its own tables (permissions): "tables" is how an app\'s role reaches an add-on\'s' });
+      });
+    } else {
+      out.push(...roleAddOnTableIssues(roles, new Set([...(m.addOns?.requires ?? []), ...(m.addOns?.suggests ?? [])].map((need) => need.key))));
+    }
+  }
+  // The rules it ships: about its own tables, roles and templates, and only what a rule can do.
+  // An add-on's rule may use the add-on's own steps, which this manifest can check; another add-on's are checked where the rule is installed.
+  const declared = (m as { addOn?: { steps?: readonly AddOnStep[] | undefined } }).addOn?.steps;
+  const ownSteps = declared === undefined ? undefined : { addOn: m.key, steps: declared };
+  if (m.automations !== undefined) {
+    out.push(
+      ...automationIssues({
+        automations: m.automations,
+        tables: m.requiredSchema.tables as unknown as readonly AutomationTableShape[],
+        roles: (m.roles ?? []).map((role) => role.key),
+        templates: m.emailTemplates ?? [],
+        decided: (table) => decided.get(table) ?? new Set<string>(),
+        ...(ownSteps === undefined ? {} : { steps: ownSteps }),
+      }),
+    );
+  }
+  if (shapeOf === undefined) out.push(...addOnNeedsIssues(m));
+  if (m.documents !== undefined) {
+    out.push(
+      ...appDocumentIssues(m.documents, {
+        index,
+        // An add-on draws its own documents itself, and another add-on's only when it suggests that one.
+        addOns: new Set([...(m.kind === 'add-on' ? [m.key] : []), ...[...(m.addOns?.requires ?? []), ...(m.addOns?.suggests ?? [])].map((need) => need.key)]),
+        features: new Set((m.addOns?.features ?? []).map((feature) => feature.id)),
+        perNight: (ref) =>
+          new Map(
+            (tables.get(ref)?.columns ?? []).flatMap((column) =>
+              column.rules?.perNight === undefined ? [] : [[column.ref, { rateVia: column.rules.perNight.rate.via }] as const],
+            ),
+          ),
+        unlisted: (table, column) => unlistedColumn(m, table, column),
+      }),
+    );
+  }
+  if (sink !== undefined) sink.decided = new Map(decided);
+  return out;
+}
+
+/**
+ * Where a manifest reads a value of the settings row: the keys a `{table,
+ * column}` setting sits under, or the lists whose items are settings (a move
+ * waiting for one, an entry switched off by one). Any other `{table, column}`
+ * (a person found by address, a changed column an email watches) is no
+ * setting.
+ */
+const SETTING_KEYS: ReadonlySet<string> = new Set([
+  'time', 'minutes', 'hours', 'days', 'perSlot', 'slotMinutes', 'windowDays', 'noticeMinutes', 'cancelHours', 'opens', 'closes',
+  'size', 'min', 'max', 'aheadDays', 'grid', 'from', 'startSetting', 'prefixSetting', 'enabledBy', 'fallback', 'setting',
+]);
+const SETTING_LISTS: ReadonlySet<string> = new Set(['setting', 'requireSetting']);
+
+/** Whether a value is a setting read from a table (`{table, column}`, with a list item's `eq` or `when`). */
+function isTableSetting(value: unknown): value is { table: string; column: string } {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  const found = value as Record<string, unknown>;
+  return typeof found['table'] === 'string' && typeof found['column'] === 'string' && keys.every((key) => ['table', 'column', 'eq', 'when'].includes(key));
+}
+
+/**
+ * Every setting a rule reads from a table, anywhere in the manifest: its
+ * tables' rules (limits, moments, moves, stamps, fills), its public entries
+ * and keys, and its outbox.
+ */
+export function settingReferences(m: {
+  requiredSchema: { tables: readonly unknown[] };
+  publicAccess?: readonly unknown[] | undefined;
+  publicKeys?: unknown;
+  outbox?: unknown;
+}): { path: (string | number)[]; table: string; column: string }[] {
+  const out: { path: (string | number)[]; table: string; column: string }[] = [];
+  const walk = (value: unknown, path: (string | number)[], key: string | number | undefined, list: string | undefined) => {
+    if (Array.isArray(value)) {
+      value.forEach((item, i) => walk(item, [...path, i], i, typeof key === 'string' ? key : undefined));
+      return;
+    }
+    if (typeof value !== 'object' || value === null) return;
+    const named = typeof key === 'string' ? SETTING_KEYS.has(key) : list !== undefined && SETTING_LISTS.has(list);
+    if (named && isTableSetting(value)) {
+      out.push({ path, table: value.table, column: value.column });
+      return;
+    }
+    for (const [child, inner] of Object.entries(value)) walk(inner, [...path, child], child, undefined);
+  };
+  walk(m.requiredSchema.tables, ['requiredSchema', 'tables'], 'tables', undefined);
+  walk(m.publicAccess ?? [], ['publicAccess'], 'publicAccess', undefined);
+  walk(m.publicKeys, ['publicKeys'], 'publicKeys', undefined);
+  walk(m.outbox, ['outbox'], 'outbox', undefined);
+  return out;
+}
+
+/**
+ * A setting is read from a table holding ONE row — or it reads whichever row
+ * the database returns first (another guest's arrival time). One-row: the
+ * app's settings table (its outbox's `settings.table`), or a table standing
+ * alone — no foreign key of its own, none of another table pointing at it,
+ * and no states, limits or bookings, as a venue's rules are kept. Anything
+ * else is refused; and on the server a table found holding more rows is read
+ * as having no setting at all.
+ */
+function settingTableIssues(m: {
+  requiredSchema: { tables: readonly RequiredTableShape[] };
+  publicAccess?: readonly unknown[] | undefined;
+  publicKeys?: unknown;
+  outbox?: { settings?: { table: string } | undefined } | undefined;
+  addOn?: { settingsTable?: string | undefined } | undefined;
+}): ReferenceIssue[] {
+  const tables = m.requiredSchema.tables;
+  const settingsTable = m.outbox?.settings?.table;
+  const oneRow = (ref: string): boolean => {
+    // An add-on's settings table is one row by its own word: the install makes the row, and it may link to others.
+    if (ref === settingsTable || ref === m.addOn?.settingsTable) return true;
+    const table = tables.find((t) => t.ref === ref);
+    if (table === undefined) return true; // a table the manifest lacks is refused where the rule is checked
+    if (table.states !== undefined || table.capacity !== undefined || table.booking !== undefined || table.occupies !== undefined) return false;
+    if (table.columns.some((column) => column.type === 'fk')) return false;
+    return !tables.some((other) => other.columns.some((column) => column.type === 'fk' && column.references === ref));
+  };
+  return settingReferences(m)
+    .filter((ref) => !oneRow(ref.table))
+    .map((ref) => ({
+      path: ref.path,
+      message: `"${ref.table}" may hold many rows, so "${ref.table}.${ref.column}" is no setting: read settings from the app's one-row settings table (outbox.settings.table), or from a table that links nowhere, that no table links to, and that keeps no states or limits`,
+    }));
+}
+
+/**
+ * Advice about a capped balance worked out from a formula (`balance.of` a
+ * total of subtotal and tax): a write that changes what the formula reads is
+ * judged against the cap one row at a time, but a batch (a bulk edit, an
+ * import) settles the balance after its rows are written, without the cap. So
+ * every column the formula reads — through other formulas, and the lines a
+ * total adds up — should stay as it is whenever the capped rows (payments) can
+ * exist: locked by the table's states in every state such a row can be
+ * written in or left in (a sent or void invoice), or the lines locked with it.
+ * One path per balance whose formula reads a column that stays writable.
+ */
+export function cappedFormulaWarnings(tables: readonly RequiredTableShape[]): { path: (string | number)[]; message: string }[] {
+  const out: { path: (string | number)[]; message: string }[] = [];
+  tables.forEach((table, t) => {
+    const columns = new Map(table.columns.map((column) => [column.ref, column]));
+    table.columns.forEach((column, c) => {
+      const rollup = column.rules?.rollup;
+      const balance = rollup?.balance;
+      if (rollup === undefined || balance === undefined) return;
+      const of = columns.get(balance.of);
+      if (of?.rules?.formula === undefined) return;
+      // The rows the cap holds back: this total's, and those of each total the balance takes away that is capped.
+      const capped = [
+        ...(rollup.cap === true ? [rollup.from] : []),
+        ...(balance.minus ?? []).flatMap((ref) => {
+          const minus = columns.get(ref)?.rules?.rollup;
+          return minus?.cap === true ? [minus.from] : [];
+        }),
+      ];
+      if (capped.length === 0) return;
+      const states = table.states;
+      const all = [...new Set([...(table.columns.find((x) => x.ref === states?.column)?.enum ?? []), ...Object.keys(states?.moves ?? {})])];
+      // Every state a capped row can be written in, and every state reached from those: the row stays.
+      const living = new Set<string>();
+      for (const child of capped) {
+        const tie = states?.children?.[child];
+        const from = tie?.createIn ?? tie?.parentIn;
+        for (const state of from ?? all) living.add(state);
+      }
+      if (states !== undefined) {
+        const queue = [...living];
+        while (queue.length > 0) {
+          const next = queue.pop()!;
+          for (const move of states.moves[next] ?? []) {
+            const to = typeof move === 'string' ? move : move.to;
+            if (!living.has(to)) {
+              living.add(to);
+              queue.push(to);
+            }
+          }
+        }
+      }
+      const locked = states?.lock !== undefined && living.size > 0 && [...living].every((state) => states.lock!.when.includes(state));
+      const kept = (ref: string) => locked && !(states?.lock?.except ?? []).includes(ref);
+      // The columns the formula reads, down through formulas; a total stands for the lines it adds up.
+      const open: string[] = [];
+      const seen = new Set<string>();
+      const read = (ref: string) => {
+        if (seen.has(ref)) return;
+        seen.add(ref);
+        const found = columns.get(ref);
+        if (found?.rules?.formula !== undefined) {
+          for (const input of formulaColumns(found.rules.formula)) read(input);
+          return;
+        }
+        const total = found?.rules?.rollup;
+        if (total !== undefined) {
+          if (!(kept(ref) && states?.children?.[total.from]?.lock === true)) open.push(ref);
+          return;
+        }
+        if (!kept(ref)) open.push(ref);
+      };
+      for (const input of formulaColumns(of.rules.formula)) read(input);
+      if (open.length === 0) return;
+      out.push({
+        path: ['requiredSchema', 'tables', t, 'columns', c, 'rules', 'rollup', 'balance', 'of'],
+        message: `"${table.ref}.${balance.of}" is worked out from ${open.map((ref) => `"${ref}"`).join(', ')}, which can change while "${capped.join('", "')}" rows are held to the balance: a bulk edit or an import settles the balance without the cap. Lock them with the table's states while those rows can exist`,
+      });
+    });
+  });
+  return out;
+}
+
+/**
+ * A slot limit a guest may ask about, whose rows each take a party written in
+ * a column: the party asked is capped at what one row may hold, so the column
+ * says it (`validation.max`) — or a page could ask ever larger parties and
+ * learn how full each time is. A released app's slot rule is answered as it
+ * always was.
+ */
+function slotPartyIssues(m: { requiredSchema: { tables: readonly RequiredTableShape[] }; publicAccess?: readonly PublicAccess[] | undefined }): ReferenceIssue[] {
+  const out: ReferenceIssue[] = [];
+  (m.publicAccess ?? []).forEach((entry, e) => {
+    if (entry.kind !== 'availability') return;
+    const table = m.requiredSchema.tables.find((t) => t.ref === entry.table);
+    if (table?.capacity === undefined || isLegacyCapacity(table.capacity)) return;
+    const rule = rulesOf(table.capacity)[entry.rule ?? 0];
+    if (rule === undefined || kindOf(rule) !== 'slot' || !('amount' in rule) || typeof rule.amount !== 'string') return;
+    const amount = rule.amount;
+    if (table.columns.find((column) => column.ref === amount)?.rules?.validation?.max !== undefined) return;
+    out.push({
+      path: ['publicAccess', e],
+      message: `"${table.ref}.${amount}" is the party a guest asks about: give it a largest value (rules.validation.max), or a page asking ever larger parties learns how full each time is`,
+    });
+  });
+  return out;
+}
+
+/** The rules through which Adminium decides a column: nobody else writes it. */
+const DECIDING_RULES = ['copy', 'sequence', 'code', 'rollup', 'stamp', 'formula', 'format', 'default', 'lookup', 'band'] as const;
+const decidedByRules = (rules: ColumnRules | undefined) => DECIDING_RULES.some((name) => rules?.[name] !== undefined);
+
+/**
+ * A stamp emptied by an undo watches the table's state column, is a column
+ * that may be empty, and some move marked `undo` leaves one of the states it
+ * watches — or it would never be emptied.
+ */
+function clearOnBackIssues(
+  table: RequiredTableShape,
+  column: RequiredTableShape['columns'][number],
+  triggers: readonly unknown[],
+  path: (string | number)[],
+): { path: (string | number)[]; message: string }[] {
+  const out: { path: (string | number)[]; message: string }[] = [];
+  if (column.nullable !== true) out.push({ path, message: `"${table.ref}.${column.ref}" is not nullable, so an undo cannot empty it` });
+  const states = (table as { states?: States }).states;
+  const watched = triggers.flatMap((trigger) => {
+    const t = trigger as { column?: unknown; values?: unknown[] } | string;
+    return typeof t === 'object' && t.values !== undefined && states !== undefined && t.column === states.column ? t.values.map(String) : [];
+  });
+  if (states === undefined || watched.length === 0) {
+    out.push({ path, message: 'only a stamp written when the state moves is emptied by an undo: watch the table\'s state column' });
+    return out;
+  }
+  const undone = Object.entries(states.moves).some(([from, moves]) => watched.includes(from) && moves.some((move) => typeof move === 'object' && move.undo === true));
+  if (!undone) out.push({ path, message: `no move marked undo leaves ${watched.map((v) => `"${v}"`).join(', ')}, so nothing ever empties it` });
+  return out;
+}
+
+/** What renews a code must be another column of the row, one a person changes (or a stamp writes). */
+function codeRenewIssues(
+  table: RequiredTableShape,
+  column: RequiredTableShape['columns'][number],
+  renew: NonNullable<NonNullable<ColumnRules['code']>['renew']>,
+  path: (string | number)[],
+): { path: (string | number)[]; message: string }[] {
+  const out: { path: (string | number)[]; message: string }[] = [];
+  const triggers = Array.isArray(renew.on) ? renew.on : [renew.on];
+  triggers.forEach((trigger, k) => {
+    const at = Array.isArray(renew.on) ? [...path, 'on', k] : [...path, 'on'];
+    const watched = table.columns.find((c) => c.ref === trigger.column);
+    if (watched === undefined) {
+      out.push({ path: [...at, 'column'], message: `"${table.ref}" has no column "${trigger.column}"` });
+    } else if (watched.ref === column.ref) {
+      out.push({ path: [...at, 'column'], message: 'a code is renewed by another column' });
+    } else if (watched.rules?.code !== undefined) {
+      out.push({ path: [...at, 'column'], message: `"${table.ref}.${watched.ref}" is a code of its own, so it renews nothing` });
+    } else if (watched.type === 'json' || watched.type === 'blob') {
+      out.push({ path: [...at, 'column'], message: `"${table.ref}.${watched.ref}" is a ${watched.type} column, so a change of it is not compared` });
+    } else if ('values' in trigger) {
+      for (const value of trigger.values) {
+        if (!valueFits(watched, value)) out.push({ path: [...at, 'values'], message: `${JSON.stringify(value)} is not a value of "${table.ref}.${watched.ref}"` });
+      }
+    } else if (decidedByRules(watched.rules) && watched.rules?.stamp === undefined) {
+      // A stamp is decided in the same step as the renewal, before it: a holder copied in as an offer is taken renews.
+      out.push({ path: [...at, 'column'], message: 'a code is renewed by a change a person makes, or a stamp' });
+    }
+  });
+  return out;
+}
+
+/**
+ * A foreign key filled from a typed code: the link, the column the code is
+ * typed into, and the column of the other table it is found by — one row,
+ * compared as a code, never a shared link's secret.
+ */
+function codeLookupIssues(
+  table: RequiredTableShape,
+  column: RequiredTableShape['columns'][number],
+  lookup: NonNullable<ColumnRules['lookup']>,
+  path: (string | number)[],
+  ctx: { index: ReturnType<typeof tableIndex>; tables: ReadonlyMap<string, RequiredTableShape>; shareCodes: (table: string) => string[] },
+): { path: (string | number)[]; message: string }[] {
+  const out: { path: (string | number)[]; message: string }[] = [];
+  const into = lookup.table;
+  if (typeof into !== 'string') {
+    // The other table is an add-on's: this manifest cannot see it, so the link says where it goes.
+    const link = column.rules?.addOnLink;
+    if (link === undefined || link.addOn !== into.addOn || link.table !== into.table) {
+      out.push({
+        path: [...path, 'table'],
+        message: `a lookup into "${into.addOn}"'s table "${into.table}" fills a column that links there: give "${table.ref}.${column.ref}" rules.addOnLink {"addOn": "${into.addOn}", "table": "${into.table}"}`,
+      });
+    }
+  } else if (column.type !== 'fk' || column.nullable !== true || column.references !== into) {
+    out.push({ path: [...path, 'table'], message: `a lookup fills this table's link to "${into}": the column is a nullable foreign key to it` });
+  }
+  const typed = table.columns.find((c) => c.ref === lookup.from);
+  if (typed === undefined) {
+    out.push({ path: [...path, 'from'], message: `"${table.ref}" has no column "${lookup.from}"` });
+  } else if (
+    typed.ref === column.ref ||
+    typed.type !== 'text' ||
+    typed.maxLength === undefined ||
+    typed.maxLength > 64 ||
+    typed.nullable !== true ||
+    decidedByRules(typed.rules)
+  ) {
+    out.push({ path: [...path, 'from'], message: 'the code is typed into a nullable text column of up to 64 characters' });
+  }
+  if (typeof into !== 'string') {
+    // What the code is found by is the add-on's to keep; only this table's side of a scope is checked here.
+    (lookup.scope ?? []).forEach((scope, k) => {
+      if (ctx.index.column(table.ref, scope.equals) === undefined) out.push({ path: [...path, 'scope', k, 'equals'], message: `"${table.ref}" has no column "${scope.equals}"` });
+    });
+    return out;
+  }
+  const target = ctx.tables.get(into);
+  if (target === undefined) {
+    out.push({ path: [...path, 'table'], message: `"${into}" is not a table of this app` });
+    return out;
+  }
+  const found = target.columns.find((c) => c.ref === lookup.column);
+  const scopeColumns = (lookup.scope ?? []).map((s) => s.column);
+  if (found === undefined) {
+    out.push({ path: [...path, 'column'], message: `"${into}" has no column "${lookup.column}"` });
+  } else {
+    // A set of columns unique together counts when its other columns are the scope's.
+    const sets = ((target as { unique?: readonly (readonly string[])[] }).unique ?? []).filter((set) => set.includes(found.ref));
+    const scoped = sets.some((set) => {
+      const others = set.filter((ref) => ref !== found.ref);
+      return others.length === scopeColumns.length && others.every((ref) => scopeColumns.includes(ref));
+    });
+    if (found.type !== 'text' || (found.unique !== true && found.rules?.code === undefined && !scoped)) {
+      out.push({ path: [...path, 'column'], message: `a code finds one row: make "${into}.${found.ref}" unique (or unique with its scope)` });
+    }
+    if (found.rules?.code === undefined && found.rules?.normalize !== 'code') {
+      out.push({ path: [...path, 'column'], message: `"${into}.${found.ref}" is compared as a code: give it normalize "code"` });
+    }
+    if (ctx.shareCodes(into).includes(found.ref)) {
+      out.push({ path: [...path, 'column'], message: "a shared link's code is never looked up" });
+    }
+  }
+  (lookup.where ?? []).forEach((condition, k) => {
+    const at = [...path, 'where', k];
+    const filter = ctx.index.column(into, condition.column);
+    if (filter === undefined) {
+      out.push({ path: [...at, 'column'], message: `"${into}" has no column "${condition.column}"` });
+    } else if ('eq' in condition) {
+      if (!valueFits(filter, condition.eq)) out.push({ path: [...at, 'eq'], message: `${JSON.stringify(condition.eq)} is not a value of "${into}.${filter.ref}"` });
+    } else if (filter.type !== 'date' && filter.type !== 'timestamptz') {
+      out.push({ path: [...at, 'column'], message: `"${into}.${filter.ref}" is not a date` });
+    }
+  });
+  (lookup.scope ?? []).forEach((scope, k) => {
+    const at = [...path, 'scope', k];
+    const theirs = ctx.index.column(into, scope.column);
+    const ours = ctx.index.column(table.ref, scope.equals);
+    if (theirs === undefined) out.push({ path: [...at, 'column'], message: `"${into}" has no column "${scope.column}"` });
+    if (ours === undefined) out.push({ path: [...at, 'equals'], message: `"${table.ref}" has no column "${scope.equals}"` });
+    if (theirs !== undefined && ours !== undefined && (theirs.type !== ours.type || theirs.references !== ours.references)) {
+      out.push({ path: at, message: `"${table.ref}.${ours.ref}" and "${into}.${theirs.ref}" hold different things` });
+    }
+    if (scope.orEmpty === true && theirs !== undefined && theirs.nullable !== true) {
+      out.push({ path: [...at, 'orEmpty'], message: `"${into}.${theirs.ref}" is never empty` });
+    }
+  });
+  return out;
+}
+
+/**
+ * A link filled with the band a number falls in: a nullable foreign key to
+ * the band table; its lower and upper bounds numbers of that table; the
+ * number placed one of this table's; each scope a pair of columns that hold
+ * the same thing on both sides. And no circle: the number may not read,
+ * through formulas, totals or copies, what is copied through the band link —
+ * the band would then decide itself.
+ */
+function bandIssues(
+  table: RequiredTableShape,
+  column: RequiredTableShape['columns'][number],
+  band: NonNullable<ColumnRules['band']>,
+  path: (string | number)[],
+  tables: ReadonlyMap<string, RequiredTableShape>,
+): { path: (string | number)[]; message: string }[] {
+  const out: { path: (string | number)[]; message: string }[] = [];
+  if (column.type !== 'fk' || column.nullable !== true || column.references !== band.table) {
+    out.push({ path: [...path, 'table'], message: `a band fills this table's link to "${band.table}": the column is a nullable foreign key to it` });
+  }
+  const bands = tables.get(band.table);
+  if (bands === undefined) {
+    out.push({ path: [...path, 'table'], message: `"${band.table}" is not a table of this app` });
+  } else {
+    for (const side of ['min', 'max'] as const) {
+      const ref = band[side];
+      if (ref === undefined) continue;
+      const found = bands.columns.find((c) => c.ref === ref);
+      if (found === undefined) out.push({ path: [...path, side], message: `"${band.table}" has no column "${ref}"` });
+      else if (!NUMERIC_TYPES.includes(found.type)) out.push({ path: [...path, side], message: `"${band.table}.${ref}" is not a number, so no value is placed against it` });
+    }
+    if (band.max !== undefined && band.max === band.min) out.push({ path: [...path, 'max'], message: 'a band reads its lower and its upper bound from two different columns' });
+  }
+  const placed = table.columns.find((c) => c.ref === band.value);
+  if (placed === undefined) out.push({ path: [...path, 'value'], message: `"${table.ref}" has no column "${band.value}"` });
+  else if (!NUMERIC_TYPES.includes(placed.type)) out.push({ path: [...path, 'value'], message: `"${table.ref}.${band.value}" is not a number, so it falls in no band` });
+  (band.scope ?? []).forEach((scope, k) => {
+    const at = [...path, 'scope', k];
+    const theirs = bands?.columns.find((c) => c.ref === scope.column);
+    const ours = table.columns.find((c) => c.ref === scope.equals);
+    if (bands !== undefined && theirs === undefined) out.push({ path: [...at, 'column'], message: `"${band.table}" has no column "${scope.column}"` });
+    if (ours === undefined) out.push({ path: [...at, 'equals'], message: `"${table.ref}" has no column "${scope.equals}"` });
+    else if (ours.ref === column.ref) out.push({ path: [...at, 'equals'], message: 'a band is scoped by another column than its own link' });
+    if (theirs !== undefined && ours !== undefined && (theirs.type !== ours.type || theirs.references !== ours.references)) {
+      out.push({ path: at, message: `"${table.ref}.${ours.ref}" and "${band.table}.${theirs.ref}" hold different things` });
+    }
+  });
+  if (placed !== undefined && bandReadsItself(table.ref, column.ref, band.value, tables)) {
+    out.push({ path: [...path, 'value'], message: `"${table.ref}.${band.value}" reads what is copied through "${column.ref}", so the band would decide itself` });
+  }
+  return out;
+}
+
+/**
+ * Whether a band's number reads its own link: followed through the row's
+ * formulas, the totals it adds up from child rows, the copies it takes
+ * through a link and other bands, at most a few tables deep.
+ */
+function bandReadsItself(tableRef: string, link: string, value: string, tables: ReadonlyMap<string, RequiredTableShape>): boolean {
+  const seen = new Set<string>();
+  const reads = (t: string, c: string, depth: number): boolean => {
+    const key = `${t}.${c}`;
+    if (seen.has(key) || depth > 16) return false;
+    seen.add(key);
+    if (t === tableRef && c === link) return true;
+    const doc = tables.get(t);
+    const col = doc?.columns.find((x) => x.ref === c);
+    const rules = col?.rules;
+    if (doc === undefined || rules === undefined) return false;
+    const next: [string, string][] = [];
+    if (rules.formula !== undefined) for (const name of formulaColumns(rules.formula)) next.push([t, name]);
+    if (rules.rollup !== undefined) {
+      for (const name of [rules.rollup.sum, rules.rollup.times, rules.rollup.latest?.of]) if (name !== undefined) next.push([rules.rollup.from, name]);
+    }
+    if (rules.copy !== undefined) {
+      next.push([t, rules.copy.via]);
+      const via = doc.columns.find((x) => x.ref === rules.copy!.via)?.references;
+      if (via !== undefined) next.push([via, rules.copy.from]);
+    }
+    if (rules.band !== undefined) {
+      next.push([t, rules.band.value]);
+      for (const scope of rules.band.scope ?? []) next.push([t, scope.equals]);
+    }
+    return next.some(([nt, nc]) => reads(nt, nc, depth + 1));
+  };
+  return reads(tableRef, value, 0);
+}
+
+/**
+ * A date so many working days on: written into a date column, from `now` or
+ * a date or moment of the row; its days a number, a whole-number column, or
+ * a choice with each value's days; its week named days, none twice, or a
+ * `string` setting the app declares, as its cut-off is; its closures a table
+ * of the app with two dates (and a yes/no that switches a row off).
+ */
+function workingDaysIssues(
+  table: RequiredTableShape,
+  column: RequiredTableShape['columns'][number],
+  w: z.infer<typeof addWorkingDaysSchema>,
+  path: (string | number)[],
+  index: ReturnType<typeof tableIndex>,
+  settings: readonly { key: string; type: string }[],
+): { path: (string | number)[]; message: string }[] {
+  const out: { path: (string | number)[]; message: string }[] = [];
+  if (column.type !== 'date') out.push({ path, message: 'a date so many working days on needs a date column' });
+  if (w.from !== 'now') {
+    const from = index.column(table.ref, w.from);
+    if (from === undefined) out.push({ path: [...path, 'from'], message: `"${table.ref}" has no column "${w.from}"` });
+    else if (from.type !== 'date' && from.type !== 'timestamptz') out.push({ path: [...path, 'from'], message: `"${table.ref}.${w.from}" is neither a date nor a moment` });
+    else if (from.ref === column.ref) out.push({ path: [...path, 'from'], message: 'working days are counted from another column' });
+  }
+  if (typeof w.days === 'string') {
+    const days = index.column(table.ref, w.days);
+    if (days === undefined) {
+      out.push({ path: [...path, 'days'], message: `"${table.ref}" has no column "${w.days}"` });
+    } else if (days.type === 'enum' || days.type === 'text') {
+      const missing = (days.enum ?? []).filter((value) => w.map?.[value] === undefined);
+      if (w.map === undefined || missing.length > 0) {
+        out.push({ path: [...path, 'map'], message: `each value of "${table.ref}.${w.days}" needs its days${missing.length > 0 ? ` (${missing.join(', ')})` : ''}` });
+      }
+    } else if (days.type !== 'int' && days.type !== 'bigint') {
+      out.push({ path: [...path, 'days'], message: `"${table.ref}.${w.days}" is neither a number of days nor a choice with a map` });
+    }
+  }
+  const named = (key: string, at: string) => {
+    const setting = settings.find((candidate) => candidate.key === key);
+    if (setting === undefined) out.push({ path: [...path, at], message: `the app declares no setting "${key}"` });
+    else if (setting.type !== 'string') out.push({ path: [...path, at], message: `the setting "${key}" is a ${setting.type}: a working week or a cut-off is kept in a string setting` });
+  };
+  if (typeof w.weekdays === 'string') named(w.weekdays, 'weekdays');
+  else if (new Set(w.weekdays).size !== w.weekdays.length) out.push({ path: [...path, 'weekdays'], message: 'a working week names each day once' });
+  if (w.cutoff !== undefined && !/^\d/.test(w.cutoff)) named(w.cutoff, 'cutoff');
+  if (w.closures !== undefined) {
+    const c = w.closures;
+    if (index.table(c.table) === undefined) {
+      out.push({ path: [...path, 'closures', 'table'], message: `"${c.table}" is not a table of this app` });
+    } else {
+      for (const side of ['from', 'to'] as const) {
+        const found = index.column(c.table, c[side]);
+        if (found === undefined) out.push({ path: [...path, 'closures', side], message: `"${c.table}" has no column "${c[side]}"` });
+        else if (found.type !== 'date') out.push({ path: [...path, 'closures', side], message: `"${c.table}.${c[side]}" is not a date` });
+      }
+      if (c.active !== undefined) {
+        const active = index.column(c.table, c.active);
+        if (active === undefined) out.push({ path: [...path, 'closures', 'active'], message: `"${c.table}" has no column "${c.active}"` });
+        else if (active.type !== 'bool') out.push({ path: [...path, 'closures', 'active'], message: `"${c.table}.${c.active}" is not a yes/no` });
+      }
+    }
+  }
+  return out;
+}
+
+/** What `appReferenceIssues` reads of a table. */
+export interface RequiredTableShape {
+  ref: string;
+  columns: readonly {
+    ref: string;
+    type: string;
+    role?: string | undefined;
+    nullable?: boolean | undefined;
+    enum?: string[] | undefined;
+    references?: string | undefined;
+    maxLength?: number | undefined;
+    semantic?: string | undefined;
+    unique?: true | undefined;
+    index?: true | undefined;
+    rules?: ColumnRules | undefined;
+  }[];
+  capacity?: Capacity | undefined;
+  booking?: z.infer<typeof bookingSchema> | undefined;
+  occupies?: z.infer<typeof occupiesSchema> | undefined;
+  states?: States | undefined;
+  builtOn?: string | undefined;
+  postings?: z.infer<typeof postingsSchema> | undefined;
+  adjust?: z.infer<typeof adjustSchema> | undefined;
+  check?: z.infer<typeof checkSchema> | undefined;
+  belongs?: z.infer<typeof belongsSchema> | undefined;
+  private?: true | undefined;
+  module?: string | undefined;
+}
+
+/**
+ * The version of Adminium that first installs an add-on the way it installs
+ * an app: with pages, roles, rules on its own tables and the rest of
+ * `installBlocksShape`. A manifest that uses one of those words declares at
+ * least this in `compatibility.minAdminiumVersion`, so an older server
+ * answers "needs a newer Adminium" and never "unrecognized key".
+ */
+export const ADD_ON_INSTALL_FLOOR = '0.3.18';
+
+/**
+ * The version of Adminium from which an add-on names only its own tables in
+ * a foreign key's `references`. Before it, an add-on could point a foreign
+ * key at a table of the database it was put on (`products`), which the
+ * installer found there or made empty beside it; an app now binds an add-on
+ * from its own side instead (`rules.addOnLink` on the app's column, filled
+ * by a `lookup` where a guest types a code). A manifest declaring this floor
+ * or a later one is held to it; one declaring an older floor installs as it
+ * always did.
+ */
+export const HOST_REFERENCES_FLOOR = '0.3.43';
+
+/**
+ * The words only an add-on says of its own tables: rows that expire, and an
+ * entry held to the app whose key serves it. An app's rows are its owner's to
+ * keep, and its entries serve its own key only.
+ */
+function addOnOnlyWordIssues(m: { requiredSchema: { tables: readonly { expire?: unknown }[] }; publicAccess?: readonly { appColumn?: string | undefined }[] | undefined }): { path: (string | number)[]; message: string }[] {
+  const out: { path: (string | number)[]; message: string }[] = [];
+  m.requiredSchema.tables.forEach((table, t) => {
+    if (table.expire !== undefined) out.push({ path: ['requiredSchema', 'tables', t, 'expire'], message: "only an add-on's own table expires: an app's rows are its owner's to keep" });
+  });
+  (m.publicAccess ?? []).forEach((entry, e) => {
+    if (entry.appColumn !== undefined) out.push({ path: ['publicAccess', e, 'appColumn'], message: "an app's entry serves its own key and its own rows: appColumn is said by an add-on's entry" });
+  });
+  return out;
+}
+
+/** A foreign key of an add-on at or above {@link HOST_REFERENCES_FLOOR} that names a table the add-on does not declare. */
+function hostReferenceIssues(m: { compatibility: { minAdminiumVersion: string }; requiredSchema?: { tables: readonly { ref: string; columns: readonly { ref: string; type: string; references?: string | undefined }[] }[] } | undefined }): { path: (string | number)[]; message: string }[] {
+  if (compareSemver(m.compatibility.minAdminiumVersion, HOST_REFERENCES_FLOOR) < 0) return [];
+  const tables = m.requiredSchema?.tables ?? [];
+  const own = new Set(tables.map((table) => table.ref));
+  const out: { path: (string | number)[]; message: string }[] = [];
+  tables.forEach((table, t) => {
+    table.columns.forEach((column, c) => {
+      if (column.type !== 'fk' || column.references === undefined || own.has(column.references)) return;
+      out.push({
+        path: ['requiredSchema', 'tables', t, 'columns', c, 'references'],
+        message: `"${column.references}" is not a table of this add-on: an add-on's foreign key names one of its own tables. An app binds the add-on from its side, with rules.addOnLink on its own column (and a lookup where a code is typed)`,
+      });
+    });
+  });
+  return out;
+}
+
+/**
+ * The blocks an app and an add-on declare in the same words: what Adminium
+ * makes at install beside the tables. Both branches spread it, so a block
+ * added here is read the same way from either kind.
+ */
+const installBlocksShape = {
+  roles: z.array(roleSchema).optional(),
+  /** Rows a table starts with: written at install, only into a table that holds none. */
+  seeds: z.array(seedSchema).optional(),
+  navGroups: z.array(navGroupSchema).max(12).optional(),
+  /** Keyed by a kebab-case name; a column names one with `options: {list: name}`. */
+  optionLists: z.record(z.string().regex(/^[a-z][a-z0-9-]*$/, 'a list name is kebab-case'), optionListSchema).optional(),
+  publicAccess: z.array(publicAccessSchema).max(64).optional(),
+  /** Browser keys besides the app's own `customer` key (see `public-access.ts`). */
+  publicKeys: publicKeysSchema.optional(),
+  /** The emails: an outbox table and what queues rows in it (see `outbox.ts`). */
+  outbox: outboxSchema.optional(),
+  /** The templates the outbox sends, in each language shipped. */
+  emailTemplates: z.array(emailTemplateSchema).max(32).optional(),
+  sampleData: sampleDataSchema.optional(),
+  /** Document profiles on the manifest's own tables, drawn by an add-on (see `documents.ts`). */
+  documents: z.array(appDocumentSchema).max(16).optional(),
+  /** Rules the manifest ships: installed switched as it says, the owner's to switch or copy (see `automations.ts`). */
+  automations: manifestAutomationsSchema.optional(),
+};
+
+export const appManifestSchema = z
+  .object({
+    kind: z.literal('app'),
+    manifestVersion: z.literal(MANIFEST_VERSION),
+    ...identitySchema.shape,
+    compatibility: compatibilitySchema,
+    requiredSchema: requiredSchemaSchema,
+    pages: z.array(pageSchema).min(1),
+    settings: z.array(settingSchema).optional(),
+    ...installBlocksShape,
+    /** Report documents, invoice layouts, scheduled reports and payments: a file made on an Adminium only (see `saved-parts.ts`). */
+    ...savedPartsShape,
+    widgets: z.array(manifestWidgetSchema).optional(),
+    capabilities: z.array(capabilitySchema).optional(),
+    /**
+     * ONE OR MORE SIDES. Replaces the singular `frontend`.
+     *
+     * `minItems: 1` is the gate: a manifest declaring no side does not validate,
+     * which is what turns "dashboard mandatory, staff optional, customer
+     * optional, at least one" from a slogan into something CI can hold. Two
+     * repos (factory-ops, hotel-reservations) could never validate under the old
+     * required-singular shape however their `requiredSchema` was repaired.
+     */
+    frontends: z.array(frontendSchema).min(1),
+    /** Entries of the app's sidebar section that are not pages (see `rail.ts`). */
+    navLinks: z.array(navLinkSchema).max(24).optional(),
+    /** The add-ons the app needs, suggests, or needs for a feature (see `add-ons.ts`). */
+    addOns: addOnsSchema.optional(),
+    /** The parts of the app its owner switches on and off (see `modules.ts`). */
+    modules: modulesSchema.optional(),
+    /**
+     * The app shows maps. Its install asks once, for the whole install,
+     * whether maps are shown (a map's pictures come from a map server); the
+     * first app that says this asks, and no later one asks again.
+     */
+    maps: z.literal(true).optional(),
+    /** The tables that hold the app's people and companies, and where else a person is copied (see `people.ts`). */
+    people: peopleSchema.optional(),
+    /** Where a self-made app was saved (see `saved-apps.ts`). */
+    provenance: provenanceSchema.optional(),
+    /** A self-made app's icon, a lucide name (see `saved-apps.ts`). */
+    icon: appIconSchema.optional(),
+    /** The other apps a self-made app needs on its database (see `app-requires.ts`). */
+    apps: appsBlockSchema.optional(),
+    /** A self-made app's part that is the whole deployment's: its look, languages, wording and system emails (see `instance.ts`). */
+    instance: instanceSchema.optional(),
+  })
+  .strict()
+  .refine(capabilitiesNotContradictory, { ...CAPS_MESSAGE, path: [...CAPS_MESSAGE.path] })
+  .refine(compatibilityWindowOrdered, { ...WINDOW_MESSAGE, path: [...WINDOW_MESSAGE.path] })
+  .refine(sidesAreDistinct, { ...SIDES_MESSAGE, path: [...SIDES_MESSAGE.path] })
+  .superRefine((m, ctx) => {
+    for (const issue of phoneSideIssues(m)) ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    for (const issue of railIssues(m)) ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    for (const issue of installFloorIssues(m)) ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    for (const issue of mailClassFloorIssues(m)) ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    for (const issue of peopleIssues(m, tableIndex(m.requiredSchema.tables))) ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    for (const issue of publicConsentIssues(m, tableIndex(m.requiredSchema.tables))) ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    for (const issue of addOnOnlyWordIssues(m)) ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    for (const issue of appReferenceIssues(m)) {
+      ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    }
+    for (const issue of appSeedIssues(m)) ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    for (const issue of savedAppIssues(m)) ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    for (const issue of requiredAppIssues(m)) ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    for (const issue of instanceIssues(m)) ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    for (const issue of moduleIssues(m)) ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    for (const issue of leftOutIssues(m)) ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    for (const issue of savedPartsIssues(m, tableIndex(m.requiredSchema.tables))) ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    // A calendar page's named columns, against the app's own tables.
+    for (const issue of pageCalendarIssues(m.pages, tableIndex(m.requiredSchema.tables))) {
+      ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    }
+    // A board page's named columns, against the app's own tables.
+    for (const issue of pageBoardIssues(m.pages, tableIndex(m.requiredSchema.tables))) {
+      ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    }
+    // A records page's tab words, filters and bulk actions, against the app's own tables.
+    for (const issue of pageConfigIssues(m.pages, tableIndex(m.requiredSchema.tables))) {
+      ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    }
+  });
+
+/**
+ * WHAT AN ADD-ON MAY DECLARE, AND WHAT IT STILL MAY NOT.
+ *
+ * An add-on that keeps tables of its own is installed the way an app is: it
+ * may declare generated `pages` over those tables, `roles`, rules on its
+ * columns, option lists, emails, documents, sample data and public entries —
+ * the blocks of `installBlocksShape`, read by the same code as an app's.
+ *
+ * Two kinds of page now live in one add-on document, and they are different
+ * things: a top-level `pages` row is a GENERATED page, a `template` the engine
+ * renders with `bindings` and `config`; an `addOn.pages` row is CODE, a module
+ * of the add-on's own bundle. Both are addressed under the add-on's key.
+ *
+ * `frontends` is absent on purpose: an add-on has no screens outside the
+ * dashboard, and leaving the field off a `.strict()` schema is a stronger
+ * guarantee than a lint rule. So are `addOns.requires` and `addOns.features`:
+ * an add-on may suggest another, never need one.
+ */
+export const addOnManifestSchema = z
+  .object({
+    kind: z.literal('add-on'),
+    manifestVersion: z.literal(MANIFEST_VERSION),
+    ...identityShape,
+    categories: z.array(addOnCategorySchema).min(1),
+    compatibility: compatibilitySchema,
+    addOn: addOnBlockSchema,
+    // An add-on may bring its own tables — kept on disconnect.
+    requiredSchema: requiredSchemaSchema.optional(),
+    settings: z.array(settingSchema).optional(),
+    capabilities: z.array(capabilitySchema).optional(),
+    widgets: z.array(manifestWidgetSchema).optional(),
+    /** Generated pages over the add-on's own tables. */
+    pages: z.array(pageSchema).min(1).optional(),
+    ...installBlocksShape,
+    /** Other add-ons this one works with when they are there. Never one it needs. */
+    addOns: addOnsSchema.pick({ suggests: true }).strict().optional(),
+  })
+  .strict()
+  .refine(capabilitiesNotContradictory, { ...CAPS_MESSAGE, path: [...CAPS_MESSAGE.path] })
+  .refine(compatibilityWindowOrdered, { ...WINDOW_MESSAGE, path: [...WINDOW_MESSAGE.path] })
+  .superRefine((m, ctx) => {
+    for (const issue of installFloorIssues(m)) ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    for (const issue of mailClassFloorIssues(m)) ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    // An add-on keeps no people of its own: a tick on its public entry has nobody to be kept for.
+    for (const issue of publicConsentIssues(m, tableIndex(m.requiredSchema?.tables ?? []))) ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    for (const issue of addOnModuleIssues(m)) ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    // An add-on is never self-made: a page envelope, views and the table marks are read the same way as an app's.
+    for (const issue of savedAppIssues(m)) ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    // From its floor on, an add-on's foreign keys name its own tables only; older manifests keep pointing at the database's.
+    for (const issue of hostReferenceIssues(m)) ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    // Add-ons released before the floor keep the page refs they shipped with.
+    if (m.pages !== undefined || compareSemver(m.compatibility.minAdminiumVersion, ADD_ON_INSTALL_FLOOR) >= 0) {
+      for (const issue of addOnPageRefIssues(m)) ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    }
+    // From the floor on a page's code is handed out behind the page's own permission; a slot's is handed to everybody signed in.
+    if (compareSemver(m.compatibility.minAdminiumVersion, ADD_ON_INSTALL_FLOOR) >= 0) {
+      for (const issue of sharedPageFileIssues(m)) ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    }
+    if (!installsLikeAnApp(m)) return;
+    // An issue with a code of its own carries it in `params`, where the validator reads it back.
+    for (const issue of addOnInstallIssues(m)) ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path, ...(issue.code === undefined ? {} : { params: { code: issue.code } }) });
+  })
+  .superRefine((m, ctx) => {
+    // `addOn.shapes` is typed loosely in the contracts package (it cannot see
+    // the column schema without importing this one); it is checked in full here.
+    const raw = m.addOn.shapes ?? [];
+    const shapes: ShapeDefinition[] = [];
+    raw.forEach((candidate, s) => {
+      const parsed = shapeDefinitionSchema.safeParse(candidate);
+      if (parsed.success) shapes.push(parsed.data);
+      else for (const issue of parsed.error.issues) ctx.addIssue({ code: 'custom', message: issue.message, path: ['addOn', 'shapes', s, ...issue.path.map((p) => (typeof p === 'symbol' ? String(p) : p))] });
+    });
+    if (shapes.length !== raw.length) return;
+    for (const issue of shapeDefinitionIssues(m.key, (m.settings ?? []).map((setting) => setting.key), shapes)) {
+      ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
+    }
+  });
+
+/**
+ * The envelope. A document with no `kind` is treated as an app before the union
+ * discriminates, which is what keeps every pre-wave-4 manifest valid.
+ */
+export const manifestSchema = z.preprocess(
+  (v) =>
+    typeof v === 'object' && v !== null && !Array.isArray(v) && (v as Record<string, unknown>).kind === undefined
+      ? { ...(v as Record<string, unknown>), kind: 'app' }
+      : v,
+  z.discriminatedUnion('kind', [appManifestSchema, addOnManifestSchema]),
+);
+
+export type AppManifest = z.infer<typeof appManifestSchema>;
+export type AddOnManifest = z.infer<typeof addOnManifestSchema>;
+
+/** One table an add-on declares under `requiredSchema`. */
+export type RequiredTable = z.infer<typeof requiredTableSchema>;
+/** One column of a {@link RequiredTable}. */
+export type RequiredColumn = z.infer<typeof requiredColumnSchema>;
+export type Manifest = AppManifest | AddOnManifest;
+
+export type { AddOnBlock };
+
+/**
+ * An app that installs without an add-on one of its tables is built on is
+ * installed with that table's module left out. What is left must be a whole
+ * manifest of its own: each such add-on is taken away in turn and the rest
+ * checked as the app is.
+ */
+function leftOutIssues(m: unknown): { path: (string | number)[]; message: string }[] {
+  const out: { path: (string | number)[]; message: string }[] = [];
+  const optional = [...optionalShapeAddOns(m)];
+  // Each alone, and all of them at once: a role of two such parts is gone only when both are.
+  const cases: [string, string[]][] = optional.map(([addOn, modules]) => [`"${addOn}"`, modules]);
+  if (optional.length > 1) cases.push([optional.map(([addOn]) => `"${addOn}"`).join(' and '), [...new Set(optional.flatMap(([, modules]) => modules))]]);
+  for (const [without, modules] of cases) {
+    const parsed = appManifestSchema.safeParse(withoutModules(m, modules));
+    if (parsed.success) continue;
+    for (const issue of parsed.error.issues.slice(0, 20)) {
+      out.push({
+        path: ['modules'],
+        message: `installed without ${without} (module ${modules.map((id) => `"${id}"`).join(', ')} left out): ${issue.path.map(String).join('.')}: ${issue.message}`,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * A word only a newer Adminium reads, under a floor that admits an older one:
+ * that server would refuse the manifest as an unknown key, so the floor is
+ * raised instead and it answers "needs a newer Adminium".
+ */
+function installFloorIssues(m: { compatibility: { minAdminiumVersion: string } }): { path: (string | number)[]; message: string }[] {
+  const floor = m.compatibility.minAdminiumVersion;
+  // The newest floor any word asks: at or above it nothing is walked.
+  const newest = Object.values(WORD_FLOORS).reduce((a, b) => (compareSemver(b, a) > 0 ? b : a), ADD_ON_INSTALL_FLOOR);
+  if (compareSemver(floor, newest) >= 0) return [];
+  return installFloorWords(m).flatMap((found) => {
+    const needs = WORD_FLOORS[found.word] ?? ADD_ON_INSTALL_FLOOR;
+    if (compareSemver(floor, needs) >= 0) return [];
+    return [
+      {
+        path: found.path.split('.').map((part) => (/^\d+$/.test(part) ? Number(part) : part)),
+        message: `"${found.word}" is read by Adminium ${needs} and later, and compatibility.minAdminiumVersion is ${floor}: set it to ${needs} or later`,
+      },
+    ];
+  });
+}
+
+/** The top-level blocks an add-on declares in an app's words. */
+const ADD_ON_BLOCKS = ['pages', 'roles', 'seeds', 'navGroups', 'optionLists', 'publicAccess', 'publicKeys', 'outbox', 'emailTemplates', 'sampleData', 'documents', 'automations', 'addOns'] as const;
+
+/**
+ * Whether an add-on is installed the way an app is: it declares a block an
+ * app declares, its tables are prefixed, or one of its tables carries a rule
+ * (a column rule, states, a limit, a booking rule, a unique set, an index).
+ * An add-on that only keeps plain tables, or none, is not.
+ */
+export function installsLikeAnApp(m: Manifest): boolean {
+  if (m.kind !== 'add-on') return false;
+  if (ADD_ON_BLOCKS.some((block) => m[block] !== undefined)) return true;
+  if (m.requiredSchema?.prefixed === true || m.addOn.settingsTable !== undefined || m.addOn.ledgers !== undefined || m.addOn.adjuster !== undefined || m.addOn.checker !== undefined || m.addOn.words !== undefined || m.addOn.recordTabs !== undefined || m.addOn.steps !== undefined || m.addOn.assistant !== undefined || m.addOn.forms !== undefined) return true;
+  return (m.requiredSchema?.tables ?? []).some(
+    (table) =>
+      table.states !== undefined ||
+      table.capacity !== undefined ||
+      table.booking !== undefined ||
+      table.occupies !== undefined ||
+      table.unique !== undefined ||
+      table.indexes !== undefined ||
+      table.postings !== undefined ||
+      table.adjust !== undefined ||
+      table.columns.some((column) => column.rules !== undefined),
+  );
+}
+
+/** The directives a seed row's value may be: the installing person's language, or an earlier seed row. */
+const SEED_DIRECTIVES = new Set(['@t', '@ref']);
+
+/** The most rows one table is seeded with. */
+export const MAX_SEED_ROWS = 200;
+
+/** One seed's rows: how many, the one row directive, own columns, the two value directives. */
+function seedRowIssues(seed: { table: string; rows?: readonly Record<string, unknown>[] | undefined }, i: number, columns: ReadonlySet<string>): { path: (string | number)[]; message: string }[] {
+  const out: { path: (string | number)[]; message: string }[] = [];
+  if ((seed.rows?.length ?? 0) > MAX_SEED_ROWS) out.push({ path: ['seeds', i, 'rows'], message: `a table is seeded with at most ${String(MAX_SEED_ROWS)} rows` });
+  (seed.rows ?? []).forEach((row, r) => {
+    for (const [name, value] of Object.entries(row)) {
+      const at = ['seeds', i, 'rows', r, name];
+      if (name === '@label') {
+        if (typeof value !== 'string') out.push({ path: at, message: 'a label is text' });
+        continue;
+      }
+      if (name.startsWith('@')) {
+        out.push({ path: at, message: `a seed row takes "@label" and no other row directive, not "${name}"` });
+        continue;
+      }
+      if (!columns.has(name)) out.push({ path: at, message: `"${seed.table}" has no column "${name}"` });
+      if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+        const directive = Object.keys(value).find((key) => key.startsWith('@'));
+        if (directive !== undefined && !SEED_DIRECTIVES.has(directive)) {
+          out.push({ path: at, message: `a seed value is a plain value, {"@t": {…}} or {"@ref": "<label>"}, not "${directive}"` });
+        }
+      }
+    }
+  });
+  return out;
+}
+
+/**
+ * An app's starting rows: rows of a table of its own, written once by its
+ * install into a table that is still empty. Not of a table built on an
+ * add-on's shape (the add-on numbers those), not of a private table (nothing
+ * but its two people writes one), and never a staff member: who works here is
+ * not known where a manifest is written.
+ */
+export function appSeedIssues(m: { seeds?: readonly { table: string; rows?: readonly Record<string, unknown>[] | undefined }[] | undefined; requiredSchema?: { tables: readonly RequiredTableShape[] } | undefined }): { path: (string | number)[]; message: string }[] {
+  const out: { path: (string | number)[]; message: string }[] = [];
+  if (m.seeds === undefined) return out;
+  const byRef = new Map((m.requiredSchema?.tables ?? []).map((table) => [table.ref, table]));
+  m.seeds.forEach((seed, i) => {
+    const table = byRef.get(seed.table);
+    if (table === undefined) {
+      out.push({ path: ['seeds', i, 'table'], message: `"${seed.table}" is not one of this app's tables` });
+      return;
+    }
+    if (table.builtOn !== undefined) out.push({ path: ['seeds', i, 'table'], message: `"${seed.table}" is built on an add-on's shape, which numbers its own rows: a seed never fills it` });
+    if (table.private === true) out.push({ path: ['seeds', i, 'table'], message: `"${seed.table}" is private: only the people its rows belong to write it, so a seed never fills it` });
+    out.push(...seedRowIssues(seed, i, new Set(table.columns.map((column) => column.ref))));
+    const staff = new Set(table.columns.filter((column) => column.rules?.staff === true).map((column) => column.ref));
+    (seed.rows ?? []).forEach((row, r) => {
+      for (const [name, value] of Object.entries(row)) {
+        if (staff.has(name) && value !== null) out.push({ path: ['seeds', i, 'rows', r, name], message: `"${name}" holds a staff member, and a seed names none: leave it out` });
+      }
+    });
+  });
+  return out;
+}
+
+/**
+ * Generated pages and code pages share one address space on a connection, so
+ * each of an add-on's is named under its key, and once.
+ */
+function addOnPageRefIssues(m: { key: string; pages?: readonly { ref: string }[] | undefined; addOn: { pages?: readonly { ref: string }[] | undefined } }): { path: (string | number)[]; message: string }[] {
+  const out: { path: (string | number)[]; message: string }[] = [];
+  const refs = new Set<string>();
+  const check = (ref: string, path: (string | number)[]) => {
+    if (ref !== m.key && !ref.startsWith(`${m.key}-`)) {
+      out.push({ path, message: `a page of "${m.key}" is addressed under its key: name it "${m.key}" or "${m.key}-…", not "${ref}"` });
+    }
+    if (refs.has(ref)) out.push({ path, message: `the page ref "${ref}" is used twice` });
+    refs.add(ref);
+  };
+  (m.pages ?? []).forEach((page, p) => check(page.ref, ['pages', p, 'ref']));
+  (m.addOn.pages ?? []).forEach((page, p) => check(page.ref, ['addOn', 'pages', p, 'ref']));
+  return out;
+}
+
+/**
+ * A page's code is the page: it is served only to who may open the page. A
+ * slot's code is served to every signed-in person. One file named as both
+ * would be the page handed out with no permission asked, so a page has a
+ * file no slot names.
+ */
+function sharedPageFileIssues(m: { addOn: { pages?: readonly { ref: string; client: string }[] | undefined; slots?: readonly { client: string }[] | undefined } }): { path: (string | number)[]; message: string }[] {
+  const open = new Set((m.addOn.slots ?? []).map((slot) => slot.client));
+  return (m.addOn.pages ?? []).flatMap((page, p) =>
+    open.has(page.client) ? [{ path: ['addOn', 'pages', p, 'client'], message: `the page "${page.ref}" is built into "${page.client}", which a slot loads too: a page's code is served only to who may open the page, so give the page a file of its own` }] : [],
+  );
+}
+
+/** An add-on's ledgers as the manifest's own schema reads them; what does not parse is reported and left out. */
+function parsedLedgers(raw: readonly unknown[], out: { path: (string | number)[]; message: string }[]): Ledger[] {
+  const parsed = ledgersSchema.safeParse(raw);
+  if (parsed.success) return parsed.data;
+  for (const issue of parsed.error.issues) {
+    out.push({ path: ['addOn', 'ledgers', ...issue.path.map((part) => (typeof part === 'symbol' ? String(part) : part))], message: issue.message });
+  }
+  return [];
+}
+
+/** An add-on's stock words, typed. Empty for an app, and for an add-on that declares none. */
+export function wordsOf(m: Manifest): StockWords[] {
+  if (m.kind !== 'add-on' || m.addOn.words === undefined) return [];
+  const parsed = wordsListSchema.safeParse(m.addOn.words);
+  return parsed.success ? parsed.data : [];
+}
+
+/** What an add-on lets a typed code find, typed; null for an app, and for an add-on that declares none. */
+export function lookUpOf(m: Manifest): LookUp | null {
+  if (m.kind !== 'add-on' || m.addOn.lookUp === undefined) return null;
+  const parsed = lookUpSchema.safeParse(m.addOn.lookUp);
+  return parsed.success ? parsed.data : null;
+}
+
+/** An add-on's adjuster, typed; null for an app, and for an add-on that declares none. */
+export function adjusterOf(m: Manifest): Adjuster | null {
+  if (m.kind !== 'add-on' || m.addOn.adjuster === undefined) return null;
+  const parsed = adjusterSchema.safeParse(m.addOn.adjuster);
+  return parsed.success ? parsed.data : null;
+}
+
+/** An add-on's checker, typed; null for an app, and for an add-on that declares none. */
+export function checkerOf(m: Manifest): Checker | null {
+  if (m.kind !== 'add-on' || m.addOn.checker === undefined) return null;
+  const parsed = checkerSchema.safeParse(m.addOn.checker);
+  return parsed.success ? parsed.data : null;
+}
+
+/** An add-on's forms block, typed; null for an app, and for an add-on that declares none. */
+export function formsOf(m: Manifest): AddOnForms | null {
+  if (m.kind !== 'add-on' || m.addOn.forms === undefined) return null;
+  const parsed = addOnFormsSchema.safeParse(m.addOn.forms);
+  return parsed.success ? parsed.data : null;
+}
+
+/** Per table of an app (or an add-on's own), the columns Adminium decides and no writer may set. */
+export function decidedColumnsOf(m: Manifest): ReadonlyMap<string, ReadonlySet<string>> {
+  const sink: { decided?: Map<string, ReadonlySet<string>> } = {};
+  appReferenceIssues(
+    {
+      ...m,
+      requiredSchema: m.requiredSchema ?? { tables: [] },
+      ...(m.kind === 'add-on' ? { ledgers: ledgersOf(m), codePages: (m.addOn.pages ?? []).map((page) => page.ref) } : {}),
+    },
+    undefined,
+    sink,
+  );
+  return sink.decided ?? new Map();
+}
+
+/** One table an app opens to forms: the entry under the key `forms`, as the forms door reads it. */
+export interface FormsEntry {
+  /** The manifest's short name for the table. */
+  table: string;
+  /** The columns a form's answers may fill. */
+  writable: string[];
+  /** The only values a browser may write into these columns. */
+  writableValues: Readonly<Record<string, readonly (string | number | boolean)[]>>;
+  /** Values the row gets whatever the answer says. */
+  defaults: Readonly<Record<string, string | number | boolean>>;
+  /** Columns the row must be given. */
+  requires: string[];
+  /** Columns Adminium decides on the table: no answer, default or source ever fills them. */
+  decided: string[];
+  /** Columns held to plain text, each with the longest it may be and the digits it may hold in all. */
+  plainText: { column: string; max: number; digits?: number }[];
+  /** The limits on a create nobody signed in for. */
+  anonymous: { perValue?: { columns: string[]; n: number }; perKeyHour?: number; perIpHour?: number };
+  /** Refused while one of these settings is off. */
+  requireSetting: { table: string; column: string; in?: string[] }[];
+  /** The part of the app the entry belongs to: closed while it is off. */
+  module?: string;
+  /** The `writable` text column a form's fixed "Source" value goes into; absent when the entry names none. */
+  source?: string;
+}
+
+/**
+ * The tables an app opens to forms, each with what a form's answer may fill
+ * there: the entries under the reserved key `forms`. Empty for a manifest that
+ * opens none. The forms door reads these and nothing else, so a form's map
+ * can never write a column the app did not open.
+ */
+export function formsEntriesOf(m: Manifest): FormsEntry[] {
+  const entries = (m.publicAccess ?? []).filter((entry) => entry.key === FORMS_KEY);
+  if (entries.length === 0) return [];
+  const decided = decidedColumnsOf(m);
+  return entries.map((entry): FormsEntry => {
+    const anonymous = entry.anonymous ?? {};
+    return {
+      table: entry.table,
+      writable: [...(entry.writable ?? [])],
+      writableValues: structuredClone(entry.writableValues ?? {}),
+      defaults: { ...(entry.defaults ?? {}) },
+      requires: [...(entry.requires ?? [])],
+      decided: [...(decided.get(entry.table) ?? [])].sort(),
+      plainText: (anonymous.plainText ?? []).map((ref) => ({
+        column: plainTextRef(ref),
+        max: plainTextMax(ref),
+        ...(typeof ref !== 'string' && ref.digits !== undefined ? { digits: ref.digits } : {}),
+      })),
+      anonymous: {
+        ...(anonymous.perValue === undefined ? {} : { perValue: { columns: [...anonymous.perValue.columns], n: anonymous.perValue.n } }),
+        ...(anonymous.perKeyHour === undefined ? {} : { perKeyHour: anonymous.perKeyHour }),
+        ...(anonymous.perIpHour === undefined ? {} : { perIpHour: anonymous.perIpHour }),
+      },
+      requireSetting: (entry.requireSetting ?? []).map((setting) => ({ table: setting.table, column: setting.column, ...(setting.in === undefined ? {} : { in: [...setting.in] }) })),
+      ...(entry.module === undefined ? {} : { module: entry.module }),
+      ...(entry.source === undefined ? {} : { source: entry.source }),
+    };
+  });
+}
+
+/** An add-on's ledgers, typed. Empty for an app, and for an add-on that declares none. */
+export function ledgersOf(m: Manifest): Ledger[] {
+  if (m.kind !== 'add-on' || m.addOn.ledgers === undefined) return [];
+  const parsed = ledgersSchema.safeParse(m.addOn.ledgers);
+  return parsed.success ? parsed.data : [];
+}
+
+/** What an app's grant on one of this add-on's tables comes to: its shape, its columns and its `appGrants` (see `app-grants.ts`). */
+export function addOnRoleTableHold(entry: RoleAddOnTable, addOn: AddOnManifest): RoleTableHold {
+  return roleTableHold(entry, { tables: (addOn.requiredSchema?.tables ?? []) as readonly AppGrantTableShape[], ledgers: ledgersOf(addOn) });
+}
+
+/** Everything wrong with an add-on that installs like an app, beyond what its blocks say of themselves. */
+function addOnInstallIssues(m: AddOnManifest): { path: (string | number)[]; message: string; code?: string }[] {
+  const out: { path: (string | number)[]; message: string; code?: string }[] = [];
+  const tables = m.requiredSchema?.tables ?? [];
+  const byRef = new Map(tables.map((table) => [table.ref, table]));
+
+  // `addOn.ledgers` is typed loosely in the contracts package (it cannot see these words); it is checked in full here.
+  const ledgers = m.addOn.ledgers === undefined ? [] : parsedLedgers(m.addOn.ledgers, out);
+  out.push(...appReferenceIssues({ ...m, requiredSchema: m.requiredSchema ?? { tables: [] }, ledgers, codePages: (m.addOn.pages ?? []).map((page) => page.ref) }));
+  if (m.pages !== undefined) out.push(...pageCalendarIssues(m.pages, tableIndex(tables)), ...pageBoardIssues(m.pages, tableIndex(tables)), ...pageConfigIssues(m.pages, tableIndex(tables)));
+
+  // The look-up is typed loosely in the contracts package: its tables and columns are checked here.
+  if (m.addOn.lookUp !== undefined) {
+    const parsed = lookUpSchema.safeParse(m.addOn.lookUp);
+    if (!parsed.success) {
+      for (const issue of parsed.error.issues) out.push({ path: ['addOn', 'lookUp', ...issue.path.map((part) => (typeof part === 'symbol' ? String(part) : part))], message: issue.message });
+    } else {
+      out.push(...lookUpIssues(parsed.data, tables as unknown as readonly LookUpTable[]));
+    }
+  }
+
+  // Stock words: a question asked of one of the add-on's own ledgers.
+  if (m.addOn.words !== undefined) {
+    const parsed = wordsListSchema.safeParse(m.addOn.words);
+    if (!parsed.success) {
+      for (const issue of parsed.error.issues) out.push({ path: ['addOn', 'words', ...issue.path.map((part) => (typeof part === 'symbol' ? String(part) : part))], message: issue.message });
+    } else {
+      out.push(...wordsIssues({ words: parsed.data, ledgers, tables: tables as readonly LedgerTableShape[], settingsTable: m.addOn.settingsTable }));
+    }
+  }
+
+  // What it tells the assistant: only of its own tables, columns and pages.
+  if (m.addOn.assistant !== undefined) {
+    out.push(...assistantIssues(m.addOn.assistant, tables as unknown as readonly AssistantTableShape[], [...(m.pages ?? []).map((page) => page.ref), ...(m.addOn.pages ?? []).map((page) => page.ref)]));
+  }
+
+  // Steps the add-on gives to Automations: the row each writes is one of its own tables.
+  if (m.addOn.steps !== undefined) out.push(...stepsIssues(m.addOn.steps, tables as unknown as readonly StepTableShape[]));
+
+  // Forms: typed loosely in the contracts package; its tables, their columns and who may write them are checked here.
+  if (m.addOn.forms !== undefined) {
+    const parsed = addOnFormsSchema.safeParse(m.addOn.forms);
+    if (!parsed.success) {
+      for (const issue of parsed.error.issues) out.push({ path: ['addOn', 'forms', ...issue.path.map((part) => (typeof part === 'symbol' ? String(part) : part))], message: issue.message });
+    } else {
+      out.push(
+        ...formsBlockIssues(parsed.data, {
+          categories: m.categories,
+          tables: tables as unknown as readonly FormsTableShape[],
+          roles: m.roles,
+          publicAccess: m.publicAccess,
+          steps: m.addOn.steps,
+          decided: (table, column) => decidedByRules(byRef.get(table)?.columns.find((candidate) => candidate.ref === column)?.rules),
+          settingsTable: m.addOn.settingsTable,
+        }),
+      );
+    }
+  }
+
+  // Tabs that list the add-on's rows on other tables' record pages: its own tables, columns and words.
+  if (m.addOn.recordTabs !== undefined) {
+    out.push(...recordTabIssues({ tabs: m.addOn.recordTabs, tables: tables as unknown as readonly RecordTabTable[], words: wordsOf(m).map((words) => words.id) }));
+  }
+
+  // Its own screens on other tables' record pages: on its own tables, under its key, in files of their own.
+  if (m.addOn.panels !== undefined) {
+    const pages = [...(m.addOn.pages ?? []), ...(m.pages ?? []).map((page) => ({ ref: page.ref, client: '' }))];
+    out.push(...recordPanelIssues({ key: m.key, panels: m.addOn.panels, tables, pages, slots: m.addOn.slots ?? [] }));
+  }
+
+  // The adjuster is typed loosely in the contracts package too: its words are checked here.
+  if (m.addOn.adjuster !== undefined) {
+    const parsed = adjusterSchema.safeParse(m.addOn.adjuster);
+    if (!parsed.success) {
+      for (const issue of parsed.error.issues) out.push({ path: ['addOn', 'adjuster', ...issue.path.map((part) => (typeof part === 'symbol' ? String(part) : part))], message: issue.message });
+    } else {
+      out.push(...adjusterIssues(parsed.data, byRef as unknown as ReadonlyMap<string, AdjustTableShape>));
+    }
+    const providers = (m.addOn.provides ?? []).filter((entry) => entry.contract === 'price-adjust');
+    if (providers.length !== 1) out.push({ path: ['addOn', 'provides'], message: 'an add-on with an adjuster provides the contract "price-adjust" exactly once' });
+  }
+
+  // The checker is typed loosely in the contracts package too: its words are checked here.
+  if (m.addOn.checker !== undefined) {
+    const parsed = checkerSchema.safeParse(m.addOn.checker);
+    if (!parsed.success) {
+      for (const issue of parsed.error.issues) out.push({ path: ['addOn', 'checker', ...issue.path.map((part) => (typeof part === 'symbol' ? String(part) : part))], message: issue.message });
+    } else {
+      out.push(...checkerIssues(parsed.data, byRef as unknown as ReadonlyMap<string, CheckTableShape>));
+    }
+    const providers = (m.addOn.provides ?? []).filter((entry) => entry.contract === 'design-check');
+    if (providers.length !== 1) out.push({ path: ['addOn', 'provides'], message: 'an add-on with a checker provides the contract "design-check" exactly once' });
+  }
+
+  // A ledger is served by the add-on's one `posting-rows` provider, and its receipt table is the one Adminium writes.
+  if (m.addOn.ledgers !== undefined) {
+    const providers = (m.addOn.provides ?? []).filter((entry) => entry.contract === 'posting-rows');
+    if (providers.length !== 1) out.push({ path: ['addOn', 'provides'], message: 'an add-on with ledgers provides the contract "posting-rows" exactly once' });
+    for (const ledger of ledgers) {
+      const receipts = byRef.get(ledger.receipts);
+      if (receipts !== undefined) out.push(...receiptTableIssues(receipts as LedgerTableShape, (...rest) => ['requiredSchema', 'tables', tables.indexOf(receipts), ...rest]));
+    }
+    // A ledger stays inside its own tables: each issue carries its code.
+    for (const issue of ledgerIssues({ tables: tables as readonly LedgerScopeTable[], ledgers, settingsTable: m.addOn.settingsTable })) {
+      out.push({ path: issue.path, message: issue.message, code: issue.code });
+    }
+  }
+
+  // Blocks that name tables need tables to name.
+  if (m.requiredSchema === undefined) {
+    for (const block of ['pages', 'outbox', 'publicAccess', 'sampleData', 'documents', 'seeds'] as const) {
+      if (m[block] !== undefined) out.push({ path: [block], message: `"${block}" names tables, and this add-on declares none (requiredSchema)` });
+    }
+  }
+
+  // An entry's stored ref is its table's real name: only a prefixed add-on's can never meet an app's.
+  if (m.publicAccess !== undefined && m.requiredSchema?.prefixed !== true) {
+    out.push({ path: ['publicAccess'], message: 'an add-on with public entries prefixes its tables: set requiredSchema.prefixed to true' });
+  }
+
+  // Seeds: rows of an own table, in its own columns, with the two directives a seed takes.
+  (m.seeds ?? []).forEach((seed, i) => {
+    const table = byRef.get(seed.table);
+    if (table === undefined) {
+      if (m.requiredSchema !== undefined) out.push({ path: ['seeds', i, 'table'], message: `"${seed.table}" is not one of this add-on's tables` });
+      return;
+    }
+    const columns = new Set(table.columns.map((column) => column.ref));
+    // History is the sample's business, never a seed's: a ledger's rows come from postings.
+    const ledger = ledgers.find((candidate) => candidate.receipts === seed.table || candidate.writes[seed.table] !== undefined);
+    if (ledger !== undefined) {
+      out.push({ path: ['seeds', i, 'table'], message: `"${seed.table}" is ${ledger.receipts === seed.table ? 'the receipt table' : 'a table'} of the ledger "${ledger.id}", which only postings write: a seed never fills it` });
+    }
+    out.push(...seedRowIssues(seed, i, columns));
+  });
+
+  // The settings table: one row, made from defaults, so every column must have one or may be empty.
+  const settings = m.addOn.settingsTable;
+  if (settings !== undefined) {
+    const table = byRef.get(settings);
+    if (table === undefined) {
+      out.push({ path: ['addOn', 'settingsTable'], message: `"${settings}" is not one of this add-on's tables` });
+    } else {
+      table.columns.forEach((column, c) => {
+        if (column.role !== undefined || column.nullable === true || column.default !== undefined || decidedByRules(column.rules)) return;
+        out.push({
+          path: ['requiredSchema', 'tables', tables.indexOf(table), 'columns', c],
+          message: `the settings row is made from defaults at install: give "${settings}.${column.ref}" a default, or make it nullable`,
+        });
+      });
+    }
+  }
+
+  // An add-on has no `customer` key of its own: its entries ride its app's key, or its one link key.
+  const keyNames = Object.keys(m.publicKeys ?? {});
+  if (keyNames.length > 1) out.push({ path: ['publicKeys'], message: 'an add-on declares at most one key: a link that opens one row' });
+  const linkKey = keyNames[0];
+  if (linkKey !== undefined) {
+    // `customer` is an app's key: an add-on's entries reach it through the app, never through a key of the add-on's own.
+    if (linkKey === 'customer') out.push({ path: ['publicKeys', linkKey], message: 'an add-on has no "customer" key: its one key is a link\'s, under a name of its own' });
+    const key = (m.publicKeys ?? {})[linkKey];
+    for (const field of ['requiresStaff', 'enabledBy', 'peak'] as const) {
+      if (key?.[field] !== undefined) out.push({ path: ['publicKeys', linkKey, field], message: `an add-on's key opens one row by its link: it takes no "${field}"` });
+    }
+  }
+  /*
+   * The link key's own link (`own: true`): emailed to the row's own address
+   * or handed once to whoever made the row, it may also change that row (a
+   * shopper's saved draft), within what its entry names and only while the row
+   * is in a state the entry names, and remove it (`DELETE`) on the same terms.
+   * Any other link only reads.
+   */
+  const ownLink = (m.publicAccess ?? []).some((entry) => entry.key !== undefined && entry.key === linkKey && entry.claim !== undefined && 'by' in entry.claim && entry.claim.own === true);
+  /** The columns of each table an entry holds to the app whose key serves it: never moved by a link. */
+  const heldTo = new Map<string, string>();
+  for (const entry of m.publicAccess ?? []) if (entry.appColumn !== undefined) heldTo.set(entry.table, entry.appColumn);
+  (m.publicAccess ?? []).forEach((entry, e) => {
+    /*
+     * A read for a session's holder alone, on each app's key: whoever the app
+     * signed in (a guest who found their order) reads one row by its own code
+     * (a design's code, which the order's lines hold) and nothing else. Never
+     * a list: everyone the app signs in would read every row.
+     */
+    if (entry.key === undefined && entry.level !== undefined && entry.claim === undefined && entry.claimedBy === undefined && entry.visibleWith === undefined) {
+      if (entry.unlockBy === undefined || !('self' in entry.unlockBy)) {
+        out.push({ path: ['publicAccess', e, 'unlockBy'], message: "an add-on's read for whoever an app signed in opens one row by its own code: give it unlockBy {\"header\": true, \"column\": …, \"self\": true, \"length\": …}" });
+      }
+    }
+    if (entry.key === undefined) return;
+    if (entry.key !== linkKey) {
+      out.push({ path: ['publicAccess', e, 'key'], message: `an add-on's entry is served through its app's key, or through the add-on's own link key${linkKey === undefined ? '' : ` "${linkKey}"`}: "${entry.key}" is neither` });
+      return;
+    }
+    // A link that is not the row's own only reads: the key rules every manifest meets say so (`publicAccessIssues`).
+    if (ownLink && entry.methods.some((method) => method !== 'GET' && method !== 'PATCH' && method !== 'DELETE')) {
+      out.push({ path: ['publicAccess', e, 'methods'], message: `"${linkKey}" opens a row as its own link, which reads it, changes it and removes it, and makes no row` });
+    }
+    if (entry.methods.includes('PATCH') || entry.methods.includes('DELETE')) {
+      // Changed or removed only while it is in a state it names: an ordered design is the order's, never the shopper's.
+      const states = Object.values(entry.writableWhen ?? {}).some((when) => Array.isArray(when));
+      const done = entry.methods.includes('PATCH') ? (entry.methods.includes('DELETE') ? 'changed or removed' : 'changed') : 'removed';
+      if (!states) out.push({ path: ['publicAccess', e, 'writableWhen'], message: `a row ${done} through "${linkKey}" is ${done} only while it is in a state the entry names: give it writableWhen, e.g. {"state": ["draft"]}` });
+    }
+    if (entry.methods.includes('PATCH')) {
+      const held = heldTo.get(entry.table);
+      if (held !== undefined && ((entry.writable ?? []).includes(held) || Object.prototype.hasOwnProperty.call(entry.writableValues ?? {}, held))) {
+        out.push({ path: ['publicAccess', e, 'writable'], message: `"${entry.table}.${held}" holds the app a row is for (appColumn), so no link moves it` });
+      }
+    }
+    const claim = entry.claim;
+    if (claim === undefined) {
+      // Whoever holds a link reads that one row and what hangs under it: nothing on the key is open to everyone.
+      if (entry.visibleWith === undefined && entry.claimedBy === undefined) {
+        out.push({ path: ['publicAccess', e], message: `"${linkKey}" opens one row by its link: an entry on it claims by token, or is read with the row a link opened (visibleWith, claimedBy)` });
+      }
+      return;
+    }
+    if (!('by' in claim) || claim.by !== 'token') {
+      out.push({ path: ['publicAccess', e, 'claim'], message: 'an add-on\'s link key claims by token' });
+      return;
+    }
+    const token = byRef.get(entry.table)?.columns.find((column) => column.ref === claim.column);
+    const code = token?.rules?.code;
+    if (code === undefined || code.length < 16 || code.hiddenFromStaff !== true) {
+      out.push({ path: ['publicAccess', e, 'claim', 'column'], message: `the link's token is a code of 16 characters that staff never see: give "${entry.table}.${claim.column}" rules.code {"length": 16, "hiddenFromStaff": true}` });
+    }
+  });
+
+  // Roles: what an add-on's role may open is its own tables, its own pages and its settings.
+  const generated = new Set((m.pages ?? []).map((page) => page.ref));
+  // A panel is opened as one of its pages is: by `page:@<panel id>:view`.
+  const code = new Set([...(m.addOn.pages ?? []).map((page) => page.ref), ...(m.addOn.panels ?? []).map((panel) => panel.id)]);
+  const settingsOf = new Set([m.key, ...(m.addOns?.suggests ?? []).map((need) => need.key)]);
+  (m.roles ?? []).forEach((role, r) => {
+    if (role.screensOnly !== undefined) out.push({ path: ['roles', r, 'screensOnly'], message: 'an add-on has no screens outside the dashboard, so its roles are never screensOnly' });
+    (role.permissions ?? []).forEach((grant, g) => {
+      const at = ['roles', r, 'permissions', g];
+      const [resource, ref, action] = grant.split(':');
+      if (resource === 'table' && ref?.startsWith('@') === true) {
+        if (m.requiredSchema === undefined) out.push({ path: at, message: `"${grant}" names a table, and this add-on declares none (requiredSchema)` });
+        return; // the table itself is checked with the app's own grants
+      }
+      if (resource === 'page' && ref?.startsWith('@') === true) {
+        const page = ref.slice(1);
+        if (action === 'view' && (generated.has(page) || code.has(page))) return;
+        if (action === 'edit' && generated.has(page)) return;
+        out.push({ path: at, message: `"${grant}": a role opens one of this add-on's own pages (view), or edits one of its generated pages` });
+        return;
+      }
+      if (resource === 'addOn' && action === 'settings' && ref !== undefined && settingsOf.has(ref)) return;
+      out.push({ path: at, message: `"${grant}": an add-on's role grants its own tables (table:@<table>:<action>), its own pages (page:@<page>:view) and its settings (addOn:${m.key}:settings)` });
+    });
+  });
+
+  if (m.sampleData?.skipWhenShared !== undefined) {
+    out.push({ path: ['sampleData', 'skipWhenShared'], message: 'an add-on shares no table with another app, so its sample data skips nothing' });
+  }
+  if (m.sampleData?.addOns !== undefined) {
+    out.push({ path: ['sampleData', 'addOns'], message: 'rows for another add-on are an app\'s to ship: an add-on\'s sample data is its own file' });
+  }
+  // A document another add-on draws may not be there: an email that carries one must be able to go without it.
+  const suggested = new Set((m.addOns?.suggests ?? []).map((need) => need.key));
+  (m.emailTemplates ?? []).forEach((template, t) => {
+    const attach = template.attach;
+    if (attach === undefined || attach.optional === true) return;
+    const drawnBy = (m.documents ?? []).find((document) => document.kind === attach.kind && suggested.has(document.addOn));
+    if (drawnBy !== undefined) {
+      out.push({
+        path: ['emailTemplates', t, 'attach', 'optional'],
+        message: `"${attach.kind}" is drawn by "${drawnBy.addOn}", which this add-on only suggests: write "optional": true, or the email could never be sent without it`,
+      });
+    }
+  });
+  return out;
+}
+
+/** Narrowing helper — the discriminant is the only thing worth branching on. */
+export function isAddOnManifest(m: Manifest): m is AddOnManifest {
+  return m.kind === 'add-on';
+}
+
+/**
+ * Cross-block rules the envelope cannot express, each with its issue
+ * code. Runs only for `kind: "add-on"`; returns [] for an app.
+ */
+export function addOnIssues(
+  m: Manifest,
+  ctx: {
+    /** Installed app keys, so `attaches` can be checked. Omit to skip. */
+    knownAppKeys?: readonly string[];
+    /** The host app's `requiredSchema` table refs. Omit to skip the scope check. */
+    hostTables?: readonly string[];
+  } = {},
+): { code: string; path: string; message: string }[] {
+  if (!isAddOnManifest(m)) return [];
+  const out: { code: string; path: string; message: string }[] = [];
+  const block = m.addOn;
+
+  // ATTACH_TARGET_UNKNOWN — every target is a known app key or "*".
+  if (ctx.knownAppKeys !== undefined) {
+    block.attaches.forEach((target, i) => {
+      if (target.app !== '*' && !ctx.knownAppKeys!.includes(target.app)) {
+        out.push({
+          code: 'ATTACH_TARGET_UNKNOWN',
+          path: `addOn.attaches.${i}.app`,
+          message: `attaches to an unknown app key "${target.app}"`,
+        });
+      }
+    });
+  }
+
+  // SLOT_UNKNOWN — belt and braces; the schema enum already refuses these.
+  (block.slots ?? []).forEach((fill, i) => {
+    if (!isSlotId(fill.slot)) {
+      out.push({
+        code: 'SLOT_UNKNOWN',
+        path: `addOn.slots.${i}.slot`,
+        message: `"${fill.slot}" is not in the closed slot registry`,
+      });
+    }
+  });
+
+  /*
+   * THERE IS NO NAV_GROUP_UNKNOWN CHECK HERE, AND THAT IS DELIBERATE.
+   *
+   * A page whose group is neither built in nor declared is refused by
+   * `addOnBlockSchema` itself, and these cross-block rules run only on a
+   * manifest that has already parsed — so a check here could never fire. It was
+   * written, and removed once its own test proved it unreachable: the refusal
+   * arrived as a schema issue with no code.
+   *
+   * SLOT_UNKNOWN above is the same shape and is kept, labelled "belt and
+   * braces". One unreachable branch is not a reason for a second: this
+   * repository has shipped four features that passed every test and could not
+   * be called, and a validator branch nobody can reach is where that starts.
+   */
+
+  // SCOPE_OUT_OF_RANGE — a `records:<table>:<verb>` scope must name a table this
+  // add-on can actually reach: one of the host app's, or one of its own.
+  const reachable = new Set<string>([
+    ...(m.requiredSchema?.tables ?? []).map((t) => t.ref),
+    ...(ctx.hostTables ?? []),
+  ]);
+  (block.scopes ?? []).forEach((scope, i) => {
+    const [domain, table] = scope.split(':');
+    if (domain !== 'records') return;
+    if (table === undefined || table.length === 0) {
+      out.push({
+        code: 'SCOPE_OUT_OF_RANGE',
+        path: `addOn.scopes.${i}`,
+        message: `"${scope}" names no table`,
+      });
+      return;
+    }
+    if (ctx.hostTables !== undefined && !reachable.has(table)) {
+      out.push({
+        code: 'SCOPE_OUT_OF_RANGE',
+        path: `addOn.scopes.${i}`,
+        message: `"${scope}" reaches a table neither the host app nor this add-on declares`,
+      });
+    }
+  });
+
+  // NETWORK_ALLOW_REQUIRED — outbound-http without an allow-list is a hole.
+  const wantsHttp = m.capabilities?.includes('outbound-http') ?? false;
+  if (wantsHttp && (block.network?.allow.length ?? 0) === 0) {
+    out.push({
+      code: 'NETWORK_ALLOW_REQUIRED',
+      path: 'addOn.network.allow',
+      message: 'outbound-http requires a non-empty allow-list of exact https hostnames',
+    });
+  }
+
+  // PAYMENT_PROVIDER_RULES — an add-on that moves money: one provider, its own
+  // hosts only (outbound-http, so the allow-list above applies), nothing shown
+  // to the public, and filed under payments.
+  const payments = (block.provides ?? []).filter((entry) => entry.contract === 'payment-provider');
+  if (payments.length > 1) {
+    out.push({ code: 'PAYMENT_PROVIDER_RULES', path: 'addOn.provides', message: 'an add-on provides the contract "payment-provider" at most once' });
+  }
+  if (payments.length > 0) {
+    if (!wantsHttp) {
+      out.push({ code: 'PAYMENT_PROVIDER_RULES', path: 'capabilities', message: 'a payment provider reaches its service through outbound-http and its allow-list' });
+    }
+    if ((block.publicSettings ?? []).length > 0) {
+      out.push({ code: 'PAYMENT_PROVIDER_RULES', path: 'addOn.publicSettings', message: 'a payment provider shows no setting to the public: publicSettings is empty' });
+    }
+    if (!(m.categories ?? []).includes('payments')) {
+      out.push({ code: 'PAYMENT_PROVIDER_RULES', path: 'categories', message: 'a payment provider is filed under the "payments" category' });
+    }
+  }
+
+  // CAPABILITY_CONFLICT — an oauth2 connect needs the capability that runs it.
+  if (block.connect.kind === 'oauth2' && !(m.capabilities?.includes('oauth-connect') ?? false)) {
+    out.push({
+      code: 'CAPABILITY_CONFLICT',
+      path: 'capabilities',
+      message: 'connect.kind "oauth2" requires the oauth-connect capability',
+    });
+  }
+
+  // FRONTEND_SECRET_LEAK — publicSettings may never name a secret setting.
+  const secrets = new Set((m.settings ?? []).filter((s) => s.secret === true).map((s) => s.key));
+  (block.publicSettings ?? []).forEach((key, i) => {
+    if (secrets.has(key)) {
+      out.push({
+        code: 'FRONTEND_SECRET_LEAK',
+        path: `addOn.publicSettings.${i}`,
+        message: `"${key}" is marked secret and must never reach the client bundle`,
+      });
+    }
+  });
+
+  return out;
+}

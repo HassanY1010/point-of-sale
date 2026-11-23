@@ -1,0 +1,338 @@
+// Pure money/label math, ported 1:1 from the design comp. Split and cent
+// rounding is deliberately identical to the comp — do not "simplify" the
+// epsilons (0.005) or the last-payer remainder logic; the ledger depends on it.
+
+import { seedTicket } from '../data/demo';
+import { source } from '../data/source';
+import type { Category, Discount, LineItem, MenuItem, ModifierGroup, Sale, ServerFigures, Split, ServiceMode } from '../data/types';
+import type { MessageKey } from '../i18n';
+import { money as fmtMoney, number as fmtNumber, t, tOr } from '../i18n/ambient';
+
+/** The slice of store state the pricing helpers read. */
+export interface PricingState {
+  ticket: { items: LineItem[]; table: string | null; seats: number; server?: ServerFigures };
+  discount: Discount | null;
+  tip: number | 'c';
+  tipCustom: string;
+  splits: Split[];
+  splitMode: 'none' | 'even' | 'amount';
+  splitN: number;
+  splitCustom: string;
+}
+
+/**
+ * The one money formatter.
+ *
+ * The currency is a property of the till, not of the reader — a New York cafe
+ * charges dollars to a German tourist too — so it is the TENANT's currency
+ * (USD in the demo, which has no tenant) while the *locale* decides grouping,
+ * decimal separator, digit shapes and where the symbol sits ($1,234.50 /
+ * 1.234,50 $ / ‏US$ ١٬٢٣٤٫٥٠). Before `<App>` mounts this falls back to en-US,
+ * which is what the unit tests assert against.
+ */
+export const money = (n: number, currency?: string): string => fmtMoney(Number(n || 0), currency);
+
+export const hexToRgba = (hex: string, a: number): string => {
+  /*
+   * A colour that is not hex is mixed, not parsed. `catTint` falls back to
+   * `var(--accent)` for a category with no tint of its own — which is every
+   * category over a real database, where there is no tint column — and read as
+   * hex that came out NaN, i.e. black: every tile washed grey, and its
+   * placeholder glyph close to invisible on a dark till.
+   */
+  if (hex && !/^#?(?:[0-9a-f]{3}){1,2}$/i.test(hex)) {
+    return 'color-mix(in srgb, ' + hex + ' ' + Math.round(a * 100) + '%, transparent)';
+  }
+  let h = (hex || '#4f46e5').replace('#', '');
+  if (h.length === 3) h = h.split('').map((c) => c + c).join('');
+  const n = parseInt(h, 16);
+  return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
+};
+
+export const itemById = (id: string): MenuItem | undefined => source.menu().find((m) => m.id === id);
+
+export const catTint = (slug: string): string => {
+  const c = source.categories().find((x) => x.slug === slug);
+  return c && c.tint ? c.tint : 'var(--accent)';
+};
+
+/**
+ * Labels for seed data whose key is only known at runtime. The category, zone
+ * and role names are UI chrome that happens to be authored in the catalogue —
+ * unlike the item and modifier names, which are the cafe's own words and stay
+ * as typed. An unrecognised slug falls back to whatever the seed says.
+ */
+export const catName = (c: Category): string => tOr('category.' + c.slug, c.name);
+export const zoneName = (zone: string): string => tOr('zone.' + zone.toLowerCase(), zone);
+export const roleName = (role: string): string =>
+  tOr('role.' + role.toLowerCase().replace(/\s+/g, ''), role);
+
+/** The tax row's label. Derived from source.taxRate() so the rate and the label cannot drift
+ * — it used to be the literal "Tax · 8.25%", written out in both the register
+ * pane and the payment summary. */
+export const taxLabel = (): string => t('common.taxRate', { pct: fmtNumber(round2(source.taxRate() * 100)) });
+
+export const tintOf = (id: string): string => {
+  const m = itemById(id);
+  return m ? catTint(m.cat) : 'var(--accent)';
+};
+
+// ---- Time labels ----
+export const mins = (ts: number): number => Math.max(0, Math.round((Date.now() - ts) / 60000));
+export const agoLabel = (ts: number): string => {
+  const m = mins(ts);
+  return m < 1 ? t('common.justNow') : t('common.minutesAgo', { m });
+};
+export const dur = (ms: number): string => {
+  const m = Math.round(ms / 60000);
+  const h = Math.floor(m / 60);
+  return h ? t('common.durationHm', { h, m: m % 60 }) : t('common.minutesShort', { m });
+};
+
+/** The table's own label ("T12") is the cafe's; the noun in front of it is
+ * ours, so only the noun is translated. */
+export const tableName = (l: string | null | undefined, mode: ServiceMode): string => {
+  if (!l || l === '—') return mode === 'retail' ? t('table.walkIn') : t('table.newTicket');
+  const map: Record<string, MessageKey> = {
+    T: 'table.table',
+    W: 'table.window',
+    P: 'table.patio',
+    B: 'table.bar',
+  };
+  const key = map[l[0]];
+  return key ? t(key, { n: l.slice(1) }) : l;
+};
+
+// ---- Options (menu v1) ----
+
+/** An item's own groups of options, in their order. */
+export const groupsOf = (itemId: string): ModifierGroup[] => source.modifierGroups().filter((g) => g.itemId === itemId);
+
+/** The chosen options of a line, in the order its groups list them. */
+export const chosenOptions = (li: LineItem): ModifierGroup['options'] => {
+  const out: ModifierGroup['options'] = [];
+  for (const group of groupsOf(li.id)) {
+    const picked = li.selection[group.id] ?? [];
+    for (const option of group.options) if (picked.includes(option.id)) out.push(option);
+  }
+  return out;
+};
+
+/**
+ * Per unit: the item's price plus every chosen option's delta (Online
+ * ordering's rule). A reward's line is free: the member's points paid for it.
+ */
+export const lineUnit = (li: LineItem): number => {
+  if (li.rewardId !== undefined) return 0;
+  // A gift card load is its own price: nothing on the menu, no options.
+  if (li.giftCard !== undefined) return li.giftCard.amount;
+  const m = itemById(li.id);
+  if (!m) return 0;
+  return chosenOptions(li).reduce((price, option) => price + option.delta, m.price);
+};
+export const lineTotal = (li: LineItem): number => lineUnit(li) * li.qty;
+export const itemsSub = (items: LineItem[]): number => (items || []).reduce((s, li) => s + lineTotal(li), 0);
+/** The goods on a ticket — every line but a gift card load, which is taxed, discounted and tipped on nothing. */
+export const goodsOf = (items: LineItem[]): LineItem[] => (items || []).filter((li) => li.giftCard === undefined);
+
+/** A line's name as the ticket, the receipt and the kitchen say it. */
+export const lineName = (li: LineItem): string =>
+  li.giftCard === undefined
+    ? (itemById(li.id)?.name ?? li.id)
+    : // A card kept by Offers is known by its last four: its whole code is never the till's to keep.
+      li.giftCard.offers === true
+      ? t('cards.kept', { last4: li.giftCard.code })
+      : t('gift.lineName', { code: li.giftCard.code });
+
+/**
+ * Round to whole cents.
+ *
+ * `money()` formats to two decimals, which rounds each figure independently at
+ * render time. If the underlying numbers keep their binary-float residue, the
+ * rows a customer reads can fail to add up to the total printed beneath them —
+ * the receipt says 12.34 + 1.02 and then prints 13.37. Every figure that leaves
+ * this module for a screen is rounded here first, and the totals are derived
+ * from the rounded parts so the arithmetic on screen is the arithmetic done.
+ */
+export const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
+
+// ---- Ticket-level money (depends on discount / tip / splits) ----
+
+/** A line as the estimate counts it: its unit price, how many, and whether it loads a gift card. */
+export interface EstimateLine {
+  unit: number;
+  qty: number;
+  /** A gift card load: taxed, discounted and tipped on nothing. */
+  load?: boolean;
+}
+
+/** A ticket's figures, each in whole cents made back into money. */
+export interface Estimate {
+  subtotal: number;
+  goods: number;
+  discount: number;
+  net: number;
+  tax: number;
+  total: number;
+}
+
+const toCents = (n: number): number => Math.round((n + Number.EPSILON) * 100);
+/** `a ÷ b` rounded half up, on whole numbers: no float decides a half-cent. */
+const divRound = (a: number, b: number): number => Math.floor((2 * a + b) / (2 * b));
+
+/**
+ * THE TILL'S ESTIMATE of a ticket, worked out exactly as Adminium works the
+ * real figures out: in whole cents, the reduction rounded once (half up)
+ * before the tax is taken on what is left, the tax rounded once.
+ *
+ * It is an estimate: the server decides the figures of a ticket, and the
+ * screens show its answer as soon as they have it. This is what they show
+ * until then (and what the demo, which has no server, shows always).
+ */
+export function estimate(lines: readonly EstimateLine[], discount: Pick<Discount, 'kind' | 'value'> | null, rate: number): Estimate {
+  let all = 0;
+  let goods = 0;
+  for (const line of lines) {
+    const amount = toCents(line.unit) * line.qty;
+    all += amount;
+    if (line.load !== true) goods += amount;
+  }
+  let off = 0;
+  if (discount !== null) {
+    // A percent keeps three decimals (12.5 %); an amount is money.
+    if (discount.kind === 'pct') off = divRound(goods * Math.round((discount.value || 0) * 1000), 100_000);
+    else if (discount.kind === 'comp') off = goods;
+    else off = toCents(discount.value || 0);
+    // Every kind is held to the goods: a reduction never exceeds what it reduces.
+    off = Math.min(Math.max(0, off), goods);
+  }
+  const net = Math.max(0, goods - off);
+  const taxCents = divRound(net * Math.round(rate * 10_000), 10_000);
+  const total = Math.max(0, all - off) + taxCents;
+  return { subtotal: all / 100, goods: goods / 100, discount: off / 100, net: net / 100, tax: taxCents / 100, total: total / 100 };
+}
+
+const estimateOf = (s: PricingState): Estimate =>
+  estimate(
+    s.ticket.items.map((li) => ({ unit: lineUnit(li), qty: li.qty, load: li.giftCard !== undefined })),
+    s.discount,
+    source.taxRate(),
+  );
+
+/**
+ * The figures a screen shows: ADMINIUM's while the ticket holds them, the
+ * till's estimate otherwise. Nothing here adds money up for the server's side
+ * — its figures are passed through as they came.
+ */
+const figures = (s: PricingState): Estimate => s.ticket.server ?? estimateOf(s);
+
+/** True while the figures shown are the till's own estimate, not yet Adminium's answer. */
+export const isEstimate = (s: PricingState): boolean => s.ticket.server === undefined;
+
+export const subtotal = (s: PricingState): number => figures(s).subtotal;
+export const discountAmt = (s: PricingState): number => figures(s).discount;
+/** The taxable/tippable base: the goods less the rounded reduction. A gift card load is none of it. */
+export const netSub = (s: PricingState): number => figures(s).net;
+export const tax = (s: PricingState): number => figures(s).tax;
+
+/** What tip preset `i` is worth on this ticket — the one authority for the
+ * amount, so the preset buttons cannot quote a figure the total disagrees with. */
+export const tipFor = (s: PricingState, i: number): number => round2(netSub(s) * (source.tipPresets()[i] || 0));
+
+export const tipAmt = (s: PricingState): number => {
+  if (s.tip === 'c') return Math.max(0, round2(parseFloat(s.tipCustom || '0') || 0));
+  return tipFor(s, s.tip);
+};
+
+/** Goods + tax, no tip — what the register shows before the payment screen. */
+export const regTotal = (s: PricingState): number => figures(s).total;
+
+/**
+ * What the register's Pay button asks for: the ticket's total, until a payment
+ * is saved on it — from then on what Adminium says is still owing. (A ticket
+ * part-paid by a gift card and opened again must not ask for the whole total.)
+ */
+export const payDue = (s: PricingState): number => {
+  const server = s.ticket.server;
+  return server !== undefined && server.due < server.total ? Math.max(0, server.due) : regTotal(s);
+};
+
+/**
+ * Goods + tax for a bare list of lines — the held tray and the move sheet,
+ * which show parked tickets and have no discount of their own.
+ *
+ * Both of those screens used to write `itemsSub(items) * (1 + source.taxRate())` inline: a
+ * third and fourth spelling of the grand-total rule, unrounded, so a parked
+ * ticket could be quoted a cent away from what the register charged for it.
+ * Equal to `regTotal` for an undiscounted ticket, which is asserted in the
+ * tests.
+ */
+export const linesTotal = (items: LineItem[]): number =>
+  estimate(
+    (items || []).map((li) => ({ unit: lineUnit(li), qty: li.qty, load: li.giftCard !== undefined })),
+    null,
+    source.taxRate(),
+  ).total;
+export const total = (s: PricingState): number => round2(regTotal(s) + tipAmt(s));
+export const paid = (s: PricingState): number => s.splits.reduce((a, x) => a + x.amount, 0);
+/**
+ * What is left to take. With Adminium's figures it is what the server says is
+ * owing, and the tip the guest chose on top (a tip is no part of what is
+ * owing, and rides on the payment that settles the ticket).
+ */
+export const remaining = (s: PricingState): number =>
+  s.ticket.server === undefined ? Math.max(0, total(s) - paid(s)) : Math.max(0, round2(s.ticket.server.due + tipAmt(s)));
+
+// Even-split with last-payer remainder absorption; fraction split absorbs to
+// the remaining balance. Ported exactly from the comp's chargeTarget().
+export const chargeTarget = (s: PricingState): number => {
+  const t = total(s);
+  const rem = remaining(s);
+  const paidv = paid(s);
+  if (s.splitMode === 'even' && s.splitN > 0) {
+    const base = Math.round((t / s.splitN) * 100) / 100;
+    const done = Math.round(paidv / (base || 1));
+    return done >= s.splitN - 1 ? rem : Math.min(base, rem);
+  }
+  if (s.splitMode === 'amount') {
+    const c = Math.min(parseFloat(s.splitCustom || '0') || 0, rem);
+    return c > 0 ? c : rem;
+  }
+  return rem;
+};
+
+/** What was chosen on a line, as the menu names it: "Medium · Oat milk · Vanilla". */
+export const modLabel = (li: LineItem): string =>
+  chosenOptions(li)
+    .map((option) => option.name)
+    .join(' · ');
+
+// Synthetic sale for the Receipt view when no real sale has been finalised yet
+// (e.g. opening it straight from the dock). Mirrors the comp's demoSale().
+export const demoSale = (ticket: { items: LineItem[]; number: number; table: string | null }, staffName: string): Sale => {
+  const items = ticket.items.length ? ticket.items : seedTicket().items;
+  const sub = round2(itemsSub(items));
+  const t = round2(itemsSub(items) * source.taxRate());
+  // The 15% preset, not a second hand-written 0.15.
+  const tip = round2(itemsSub(items) * source.tipPresets()[2]);
+  const grand = round2(sub + t + tip);
+  return {
+    number: ticket.number || 1042,
+    table: ticket.table || 'T12',
+    items: items.map((x) => ({ name: lineName(x), qty: x.qty, unit: lineUnit(x), line: lineTotal(x), mod: modLabel(x), note: x.note })),
+    subtotal: sub,
+    discount: 0,
+    discountLabel: '',
+    tax: t,
+    tip,
+    total: grand,
+    splits: [{ method: 'card', amount: grand }],
+    change: 0,
+    at: Date.now(),
+    staff: staffName,
+  };
+};
+
+// Re-exported so existing callers keep importing it from here; the definition
+// lives in data/key.ts so the seed data can derive its keys from the same code.
+export { keyOf } from '../data/key';

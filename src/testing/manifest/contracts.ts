@@ -1,0 +1,174 @@
+/*
+ * VENDORED VERBATIM from packages/add-on-contracts/src/contracts.ts.
+ * Never hand-edit this copy: change the monorepo package and re-run
+ * `node scripts/sync-manifest-validator.mjs`.
+ *
+ * WHY A COPY. `@adminium/manifest` is not published to npm and this app is a
+ * standalone repo that must build from a clean clone, so it cannot depend on
+ * the monorepo. It lives under `testing/` because `zod` is a devDependency
+ * here and a runtime dependency the host does not carry — nothing in
+ * the shipped bundle's import graph may reach it, which sources.test.ts gates.
+ *
+ * The only edits are import specifiers: `.js` becomes `.ts`, and the
+ * `@adminium/add-on-contracts` package import becomes relative ones.
+ */
+/**
+ * Provider contract registry v1 — CLOSED.
+ *
+ * Few, not many. A contract that has no implementation is a guess about a
+ * future add-on; the only way a contract gets in is alongside the add-on that
+ * implements it. The fourth was bought on a seven-exhibit dossier, not on a
+ * shape somebody liked.
+ */
+
+import { z } from 'zod';
+
+export interface ContractDefinition {
+  readonly id: string;
+  readonly version: 1;
+  readonly summary: string;
+  /** How many add-ons implement it in wave 4 — the evidence the shape is real. */
+  readonly implementations: number;
+}
+
+export const CONTRACT_REGISTRY = [
+  {
+    id: 'artwork-source',
+    version: 1,
+    summary:
+      'A way for a customer to supply artwork that is not an upload. The host runs the checks on what comes back, so no implementation marks its own homework.',
+    implementations: 2,
+  },
+  {
+    id: 'shipping-carrier',
+    version: 1,
+    summary:
+      'One delivery company: rates, booking, tracking, labels. Implemented so the second one is a copy.',
+    implementations: 1,
+  },
+  {
+    id: 'product-personalizer',
+    version: 1,
+    summary:
+      'Personalization spanning three surfaces — shopper, staff, dashboard — which is why it is a contract rather than a screen.',
+    implementations: 1,
+  },
+  {
+    /*
+     * THE FOURTH, BOUGHT 2026-09-10. This interface had been drawn twice and
+     * never built; zero occurrences in either repo until now. Its dossier is
+     * seven exhibits and two implementers in the same sub-wave (invoices;
+     * barcode-labels wrapping renderLabelSheet), which meets the count a new
+     * contract has to clear — and, by the owner's ruling, relaxes the
+     * "different means" clause for a contract Adminium ITSELF consumes. It PROVIDES kinds of document an add-on can
+     * describe and render, as an outline of slots (labels in all eight
+     * locales) and bytes (each kind declares its own formats and glyph
+     * coverage); it is CONSUMED BY the engine document pipeline (profiles,
+     * triggers, the document.render job, the /documents routes) — the first
+     * production read of runtime.providers, selected by add-on key, never by
+     * resolveProvider's lowest-key choice. "Add-ons compose" runs for real
+     * here.
+     */
+    id: 'document-render',
+    version: 1,
+    summary:
+      'Kinds of document an add-on can describe (an outline of slots, labelled in eight locales) and render to bytes (html, pdf — per kind). Consumed by the engine document pipeline; the first contract Adminium itself resolves at runtime.',
+    implementations: 2,
+  },
+  {
+    /*
+     * THE FIFTH: CODE THAT DECIDES INSIDE A SAVE. An add-on that keeps a
+     * ledger of its own answers what rows the ledger gains when a host row
+     * reaches a point; Adminium reads first, calls once, checks the answer
+     * and writes it in the same transaction. Consumed by the write path, and
+     * loaded only from a package Adminium can vouch for.
+     */
+    id: 'posting-rows',
+    version: 1,
+    summary:
+      'The rows a ledger gains when a host row reaches a point: a synchronous, pure answer from the inputs and reads Adminium hands over, written by Adminium inside the same save.',
+    implementations: 2,
+  },
+  {
+    /*
+     * THE SIXTH: WHAT AN ORDER'S LINES ARE REDUCED BY. An add-on that keeps
+     * offers, discount codes and vouchers answers one question — these lines,
+     * these typed codes, this customer — with one reduction per line.
+     * Adminium checks the answer against the lines it asked about and writes
+     * every discount column itself.
+     */
+    id: 'price-adjust',
+    version: 1,
+    summary:
+      'What an order is reduced by: one synchronous, pure answer per question — a reduction for every line, what was applied, what was refused — written by Adminium inside the save.',
+    implementations: 1,
+  },
+  {
+    /*
+     * THE EIGHTH: WHETHER A SHOPPER'S DESIGN MAY BE ORDERED. An add-on that
+     * keeps designs answers, for each order line that names one, whether it
+     * stands by its ready-made design and base and which priced features it
+     * uses. Adminium reads the rows the add-on declared, asks once a save
+     * (and once a dry run), and checks the answer against what each line
+     * pays for. A third kind of code that decides inside a save, loaded only
+     * from a package Adminium can vouch for. Its implementer is the
+     * Customiser, which both shops of the customising plan require.
+     */
+    id: 'design-check',
+    version: 1,
+    summary:
+      'Whether each order line\'s design stands and which priced features it uses: one synchronous, pure answer per question, checked by Adminium against what each line pays for, inside the save and the dry run.',
+    implementations: 1,
+  },
+  {
+    /*
+     * THE SEVENTH: MONEY THAT MOVES AT A PAYMENT SERVICE. A shop's customer
+     * pays on the provider's own hosted page; the provider half starts the
+     * checkout, says how it ended, refunds, and proves its webhooks. Consumed
+     * by the engine's payments, selected by add-on key, and loaded
+     * only from a package Adminium can vouch for. Online payments only:
+     * in-person terminals are a contract of their own when they are built.
+     * Its two implementers are the Stripe and PayPal add-ons, proven against
+     * the packed package before the release that admits it.
+     */
+    id: 'payment-provider',
+    version: 1,
+    summary:
+      'One payment service, online only: start a checkout on its hosted page, read how it ended, end one, refund, verify its webhooks, list missed events, and say which ways to pay are switched on. Answers are data; a refusal is never thrown.',
+    implementations: 2,
+  },
+  {
+    /**
+     * A card reader on the shop's counter, driven by a cloud API: the till
+     * asks the engine, the engine asks the reader, outbound only. Its two
+     * implementers are Card payments (Stripe Terminal) and the Card readers
+     * add-on (Square), proven against the packed package before the release
+     * that admits it.
+     */
+    id: 'card-terminal',
+    version: 1,
+    summary:
+      'A card reader at the counter: pair it in two steps, put an amount on it, read where the charge stands (the tip apart), take it off, refund, and read disputes by polling. Answers are data; a charge is never given up blind.',
+    implementations: 2,
+  },
+] as const satisfies readonly ContractDefinition[];
+
+export type ContractId = (typeof CONTRACT_REGISTRY)[number]['id'];
+
+export const CONTRACT_IDS = CONTRACT_REGISTRY.map((c) => c.id) as readonly ContractId[];
+
+export const contractIdSchema = z.enum(
+  CONTRACT_IDS as unknown as [ContractId, ...ContractId[]],
+);
+
+const BY_ID = new Map<string, ContractDefinition>(CONTRACT_REGISTRY.map((c) => [c.id, c]));
+
+export function isContractId(v: unknown): v is ContractId {
+  return typeof v === 'string' && BY_ID.has(v);
+}
+
+/** True when the registry carries this contract AT the declared version. */
+export function hasContractVersion(id: string, version: number): boolean {
+  const found = BY_ID.get(id);
+  return found !== undefined && found.version === version;
+}
